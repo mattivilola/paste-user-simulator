@@ -80,9 +80,17 @@ final class TypingSession {
               let source = CGEventSource(stateID: .privateState)
         else { NSSound.beep(); return }
 
-        // Preserve intentional insertions and selections when the field is not in append mode.
-        let canContinueAcrossApps = keepTypingInBackground && caretAtEnd(in: field)
-        self.canContinueAcrossApps = canContinueAcrossApps
+        let initialRange = keepTypingInBackground ? selectedRange(in: field) : nil
+        let initialLength = keepTypingInBackground ? textLength(in: field) : nil
+        var appendConfirmed = initialRange?.length == 0 && initialRange?.location == initialLength
+        // An empty editor has only one insertion point, even if its range is not exposed yet.
+        appendConfirmed = appendConfirmed || (initialLength == 0 && initialRange == nil)
+        var initialTextToVerify: String?
+        if keepTypingInBackground && !appendConfirmed &&
+            (initialRange == nil || (initialRange?.location == 0 && initialRange?.length == 0)) {
+            initialTextToVerify = attribute(kAXValueAttribute, of: field) as? String
+        }
+        canContinueAcrossApps = appendConfirmed || initialTextToVerify != nil
         hasSwitchedApps = false
         task = Task {
             defer {
@@ -101,8 +109,8 @@ final class TypingSession {
 
             let content = text.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
+            var expectedFirstAppend: String?
             @MainActor func canType() async -> Bool {
-                var refocusDeadline: ContinuousClock.Instant?
                 var requestedCaretMove = false
                 while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
                     let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
@@ -111,12 +119,12 @@ final class TypingSession {
                     if !isFrontmost {
                         guard canContinueAcrossApps else { return false }
                         hasSwitchedApps = true
-                        if hasOriginalFocus && !isWaitingForTarget && caretAtEnd(in: field, requireText: true) {
+                        if appendConfirmed && hasOriginalFocus && !isWaitingForTarget &&
+                            caretAtEnd(in: field, requireText: true) {
                             return true
                         }
                         // Some apps stop exposing their focused field when they become inactive.
                         setWaitingForTarget(true)
-                        refocusDeadline = nil
                         requestedCaretMove = false
                     } else if hasOriginalFocus {
                         if modifiersHeld {
@@ -125,28 +133,36 @@ final class TypingSession {
                             try? await Task.sleep(for: .milliseconds(25))
                             continue
                         }
-                        if !hasSwitchedApps || caretAtEnd(in: field) {
+                        if !appendConfirmed, let expected = expectedFirstAppend,
+                           let current = attribute(kAXValueAttribute, of: field) as? String {
+                            appendConfirmed = current.utf16.elementsEqual(expected.utf16)
+                            canContinueAcrossApps = appendConfirmed
+                            expectedFirstAppend = nil
+                        } else if canContinueAcrossApps && !appendConfirmed && hasSwitchedApps &&
+                                    expectedFirstAppend == nil &&
+                                    caretAtEnd(in: field) {
+                            appendConfirmed = true
+                        }
+                        if !hasSwitchedApps || (appendConfirmed && caretAtEnd(in: field)) {
                             setWaitingForTarget(false)
                             return true
                         }
-                        if !requestedCaretMove, let selection = selectedRange(in: field),
-                           let end = textLength(in: field), selection.location <= end,
-                           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-                            guard selection.length == 0, moveCaret(to: end, in: field) else { return false }
-                            requestedCaretMove = true
+                        guard canContinueAcrossApps else { return false }
+                        if appendConfirmed, !requestedCaretMove, let end = textLength(in: field) {
+                            let selection = selectedRange(in: field)
+                            if selection == nil || (selection?.length == 0 && (selection?.location ?? 0) <= end) {
+                                if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                                    _ = moveCaret(to: end, in: field)
+                                    requestedCaretMove = true
+                                }
+                            }
                         }
                     } else if !isWaitingForTarget && !hasSwitchedApps {
                         return false
                     }
 
-                    if isFrontmost {
-                        let deadline = refocusDeadline ?? clock.now + .milliseconds(500)
-                        guard clock.now < deadline else { return false }
-                        refocusDeadline = deadline
-                    }
-
                     setWaitingForTarget(true)
-                    try? await Task.sleep(for: isFrontmost ? .milliseconds(25) : .milliseconds(150))
+                    try? await Task.sleep(for: .milliseconds(150))
                 }
                 return false
             }
@@ -177,6 +193,10 @@ final class TypingSession {
                     else { return }
                 } else {
                     guard post(String(character), from: source, to: pid) else { return }
+                }
+                if let initial = initialTextToVerify {
+                    expectedFirstAppend = initial + String(character)
+                    initialTextToVerify = nil
                 }
                 try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate, variation: variation))
             }
@@ -237,10 +257,14 @@ final class TypingSession {
     }
 
     private func textLength(in field: AXUIElement) -> Int? {
-        if let count = attribute(kAXNumberOfCharactersAttribute, of: field) as? Int, count >= 0 {
+        let count = attribute(kAXNumberOfCharactersAttribute, of: field) as? Int
+        if let count, count > 0 {
             return count
         }
-        return (attribute(kAXValueAttribute, of: field) as? String)?.utf16.count
+        if let value = attribute(kAXValueAttribute, of: field) as? String {
+            return value.utf16.count
+        }
+        return count == 0 ? 0 : nil
     }
 
     private func caretAtEnd(in field: AXUIElement, requireText: Bool = false) -> Bool {

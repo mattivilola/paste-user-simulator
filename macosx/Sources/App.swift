@@ -146,7 +146,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let running = typing.isRunning
         let description: String
         if typing.isWaitingForTarget {
-            description = "Paused · Return to the original field"
+            description = "Paused · Focus the original field at its end"
         } else if running {
             description = "Typing · \(shortcut.displayName) to stop"
         } else if !shortcutAvailable {

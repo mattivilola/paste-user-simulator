@@ -20,7 +20,7 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 **Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If typing is interrupted mid-correction, check the last letter.
 
-**Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. If the field or caret cannot be verified in the background, typing pauses. When you return, the app verifies that the same field is focused and the caret is back at the end before continuing. The type/stop shortcut works from either app.
+**Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. If the field or caret cannot be verified, typing waits for the original field. If it stays paused when you return, click at the end of that field. The type/stop shortcut works from either app.
 
 The app uses Shift-Return for line breaks in multiline fields.
 
