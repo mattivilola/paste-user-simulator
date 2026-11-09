@@ -7,16 +7,19 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let shortcutButton = ShortcutButton()
     private let message = NSTextField(labelWithString: "")
     private let saveSpeed: (Int) -> Void
+    private let saveSpeedVariation: (TypingPace.Variation) -> Void
     private let saveTypoRate: (Int) -> Void
     private let saveBackgroundTyping: (Bool) -> Void
 
-    init(speed: Int, shortcut: Shortcut, typoRate: Int, keepTypingInBackground: Bool,
-         saveSpeed: @escaping (Int) -> Void, saveTypoRate: @escaping (Int) -> Void,
+    init(speed: Int, speedVariation: TypingPace.Variation, shortcut: Shortcut, typoRate: Int,
+         keepTypingInBackground: Bool, saveSpeed: @escaping (Int) -> Void,
+         saveSpeedVariation: @escaping (TypingPace.Variation) -> Void, saveTypoRate: @escaping (Int) -> Void,
          saveBackgroundTyping: @escaping (Bool) -> Void, saveShortcut: @escaping (Shortcut) -> Bool) {
         self.saveSpeed = saveSpeed
+        self.saveSpeedVariation = saveSpeedVariation
         self.saveTypoRate = saveTypoRate
         self.saveBackgroundTyping = saveBackgroundTyping
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 232),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 268),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Paste User Simulator Settings"
@@ -31,6 +34,25 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         slider.setAccessibilityLabel("Typing speed in characters per minute")
         speedLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
         updateSpeedLabel(speed)
+
+        let variation = NSPopUpButton()
+        for option in TypingPace.Variation.allCases {
+            let title = switch option {
+            case .off: "Off"
+            case .subtle: "10% · Subtle"
+            case .moderate: "20% · Moderate"
+            case .strong: "35% · Strong"
+            }
+            variation.addItem(withTitle: title)
+            variation.lastItem?.tag = option.rawValue
+        }
+        variation.selectItem(withTag: speedVariation.rawValue)
+        variation.setAccessibilityLabel("Speed variation")
+        variation.toolTip = "How much the time between keystrokes can vary."
+        variation.target = self
+        variation.action = #selector(speedVariationChanged(_:))
+        let variationRow = NSStackView(views: [NSTextField(labelWithString: "Speed variation"), variation])
+        variationRow.spacing = 12
 
         shortcutButton.title = shortcut.displayName
         shortcutButton.setAccessibilityLabel("Change keyboard shortcut")
@@ -57,7 +79,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         background.state = keepTypingInBackground ? .on : .off
         background.toolTip = "Continues only while the original field keeps focus in its app."
 
-        let stack = NSStackView(views: [speedLabel, slider, typoRow, background, shortcutRow, message])
+        let stack = NSStackView(views: [speedLabel, slider, variationRow, typoRow, background, shortcutRow, message])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -80,6 +102,12 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func speedChanged(_ slider: NSSlider) {
         updateSpeedLabel(slider.integerValue)
         saveSpeed(slider.integerValue)
+    }
+
+    @objc private func speedVariationChanged(_ popup: NSPopUpButton) {
+        if let option = TypingPace.Variation(rawValue: popup.selectedTag()) {
+            saveSpeedVariation(option)
+        }
     }
 
     @objc private func typoRateChanged(_ popup: NSPopUpButton) {

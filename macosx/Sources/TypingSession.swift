@@ -3,13 +3,22 @@ import ApplicationServices
 import Carbon
 
 enum TypingPace {
+    enum Variation: Int, CaseIterable {
+        case off = 0
+        case subtle = 10
+        case moderate = 20
+        case strong = 35
+    }
+
     static let range = 60...1200
     static let standard = 300
 
-    static func delay(after character: Character, rate: Int) -> Duration {
+    static func delay(after character: Character, rate: Int, variation: Variation) -> Duration {
         let seconds = 60.0 / Double(rate)
         let pause = ".!?,;:\n".contains(character) ? 0.65 : 0
-        return .seconds(seconds * (Double.random(in: 0.75...1.25) + pause))
+        let spread = Double(variation.rawValue) / 100
+        let multiplier = variation == .off ? 1 : Double.random(in: (1 - spread)...(1 + spread))
+        return .seconds(seconds * (multiplier + pause))
     }
 }
 
@@ -57,7 +66,8 @@ final class TypingSession {
 
     private let modifierMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
 
-    func start(text: String, rate: Int, typoRate: Int, keepTypingInBackground: Bool, target: NSRunningApplication) {
+    func start(text: String, rate: Int, variation: TypingPace.Variation, typoRate: Int,
+               keepTypingInBackground: Bool, target: NSRunningApplication) {
         let pid = target.processIdentifier
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
@@ -108,7 +118,8 @@ final class TypingSession {
                    let text = attribute(kAXValueAttribute, of: field) as? String,
                    let pending = PendingTypo(text: text, caret: caret, letter: typo) {
                     guard await canType(), post(String(typo), from: source, to: pid) else { return }
-                    try? await Task.sleep(for: TypingPace.delay(after: typo, rate: rate) + .milliseconds(100))
+                    let pause = TypingPace.delay(after: typo, rate: rate, variation: variation)
+                    try? await Task.sleep(for: pause + .milliseconds(100))
 
                     // Only delete when the field contains the exact insertion we just made.
                     guard await canType(),
@@ -125,7 +136,7 @@ final class TypingSession {
                 } else {
                     guard post(String(character), from: source, to: pid) else { return }
                 }
-                try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate))
+                try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate, variation: variation))
             }
         }
         onChange?()

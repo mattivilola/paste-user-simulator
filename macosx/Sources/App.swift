@@ -26,6 +26,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return TypingPace.range.contains(stored) ? stored : TypingPace.standard
     }
 
+    private var speedVariation: TypingPace.Variation {
+        let stored = UserDefaults.standard.object(forKey: "typingVariationPercent") as? Int
+        return stored.flatMap(TypingPace.Variation.init(rawValue:)) ?? .moderate
+    }
+
     private var typoRate: Int {
         let stored = UserDefaults.standard.integer(forKey: "typosPer100Letters")
         return TypoRate.range.contains(stored) ? stored : 0
@@ -120,7 +125,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSSound.beep()
             return
         }
-        typing.start(text: text, rate: speed, typoRate: typoRate,
+        typing.start(text: text, rate: speed, variation: speedVariation, typoRate: typoRate,
                      keepTypingInBackground: keepTypingInBackground, target: target)
     }
 
@@ -175,9 +180,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showSettings() {
         if settings == nil {
-            settings = SettingsWindow(speed: speed, shortcut: shortcut, typoRate: typoRate,
+            settings = SettingsWindow(speed: speed, speedVariation: speedVariation, shortcut: shortcut, typoRate: typoRate,
                                       keepTypingInBackground: keepTypingInBackground, saveSpeed: {
                 UserDefaults.standard.set($0, forKey: "charactersPerMinute")
+            }, saveSpeedVariation: {
+                UserDefaults.standard.set($0.rawValue, forKey: "typingVariationPercent")
             }, saveTypoRate: {
                 UserDefaults.standard.set($0, forKey: "typosPer100Letters")
             }, saveBackgroundTyping: { [weak self] enabled in
