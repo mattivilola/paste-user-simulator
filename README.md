@@ -12,7 +12,7 @@ Download the ZIP from [GitHub Releases](https://github.com/mattivilola/paste-use
 
 1. Open the app and copy some text. The menu bar clipboard icon fills when text is available.
 2. Focus a text field and press **⌘⌥V**. On first use, allow Paste User Simulator in **System Settings → Privacy & Security → Accessibility**. Then return to your text field and press the shortcut again.
-3. Press the same shortcut again to stop. Typing stops when you switch apps or move focus to a different field.
+3. Press the same shortcut again to stop. A brief indicator confirms when the shortcut starts or stops typing.
 
 Open **Settings** from the menu bar to change the shortcut or speed. The default is 300 characters per minute.
 
@@ -20,7 +20,7 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 **Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If typing is interrupted mid-correction, check the last letter.
 
-**Keep typing after switching apps** lets you work in another app while typing continues in the original field. The destination must keep that field focused in its own window and accept background keystrokes. If macOS stops reporting the original field while the destination is inactive, typing pauses and resumes when that field regains focus. The type/stop shortcut works from either app.
+**Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. If the field or caret cannot be verified in the background, typing pauses. When you return, the app verifies that the same field is focused and the caret is back at the end before continuing. The type/stop shortcut works from either app.
 
 The app uses Shift-Return for line breaks in multiline fields.
 

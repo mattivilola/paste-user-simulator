@@ -60,7 +60,8 @@ struct PendingTypo {
 @MainActor
 final class TypingSession {
     private var task: Task<Void, Never>?
-    private var keepTypingInBackground = false
+    private var canContinueAcrossApps = false
+    private var hasSwitchedApps = false
     var onChange: (() -> Void)?
     var isRunning: Bool { task != nil }
     private(set) var isWaitingForTarget = false
@@ -79,7 +80,10 @@ final class TypingSession {
               let source = CGEventSource(stateID: .privateState)
         else { NSSound.beep(); return }
 
-        self.keepTypingInBackground = keepTypingInBackground
+        // Preserve intentional insertions and selections when the field is not in append mode.
+        let canContinueAcrossApps = keepTypingInBackground && caretAtEnd(in: field)
+        self.canContinueAcrossApps = canContinueAcrossApps
+        hasSwitchedApps = false
         task = Task {
             defer {
                 task = nil
@@ -99,29 +103,50 @@ final class TypingSession {
                 .replacingOccurrences(of: "\r", with: "\n")
             @MainActor func canType() async -> Bool {
                 var refocusDeadline: ContinuousClock.Instant?
+                var requestedCaretMove = false
                 while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
                     let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
                     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
 
                     if !isFrontmost {
-                        guard keepTypingInBackground else { return false }
-                        if hasOriginalFocus && !isWaitingForTarget { return true }
+                        guard canContinueAcrossApps else { return false }
+                        hasSwitchedApps = true
+                        if hasOriginalFocus && !isWaitingForTarget && caretAtEnd(in: field, requireText: true) {
+                            return true
+                        }
                         // Some apps stop exposing their focused field when they become inactive.
                         setWaitingForTarget(true)
                         refocusDeadline = nil
+                        requestedCaretMove = false
                     } else if hasOriginalFocus {
-                        setWaitingForTarget(false)
-                        if !modifiersHeld { return true }
-                        // Give app-switch shortcuts time to finish before sending more keys.
-                        guard keepTypingInBackground else { return false }
-                    } else {
-                        guard isWaitingForTarget else { return false }
+                        if modifiersHeld {
+                            // Give app-switch shortcuts time to finish before sending more keys.
+                            guard canContinueAcrossApps else { return false }
+                            try? await Task.sleep(for: .milliseconds(25))
+                            continue
+                        }
+                        if !hasSwitchedApps || caretAtEnd(in: field) {
+                            setWaitingForTarget(false)
+                            return true
+                        }
+                        if !requestedCaretMove, let selection = selectedRange(in: field),
+                           let end = textLength(in: field), selection.location <= end,
+                           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                            guard selection.length == 0, moveCaret(to: end, in: field) else { return false }
+                            requestedCaretMove = true
+                        }
+                    } else if !isWaitingForTarget && !hasSwitchedApps {
+                        return false
+                    }
+
+                    if isFrontmost {
                         let deadline = refocusDeadline ?? clock.now + .milliseconds(500)
                         guard clock.now < deadline else { return false }
                         refocusDeadline = deadline
                     }
 
-                    try? await Task.sleep(for: isWaitingForTarget ? .milliseconds(150) : .milliseconds(25))
+                    setWaitingForTarget(true)
+                    try? await Task.sleep(for: isFrontmost ? .milliseconds(25) : .milliseconds(150))
                 }
                 return false
             }
@@ -167,8 +192,13 @@ final class TypingSession {
         onChange?()
     }
 
-    func stopForAppSwitch() {
-        if !keepTypingInBackground { stop() }
+    func appDidSwitch() {
+        guard isRunning else { return }
+        if canContinueAcrossApps {
+            hasSwitchedApps = true
+        } else {
+            stop()
+        }
     }
 
     private var modifiersHeld: Bool {
@@ -191,12 +221,37 @@ final class TypingSession {
     }
 
     private func insertionPoint(in field: AXUIElement) -> Int? {
+        guard let range = selectedRange(in: field), range.length == 0 else { return nil }
+        return range.location
+    }
+
+    private func selectedRange(in field: AXUIElement) -> CFRange? {
         guard let value = attribute(kAXSelectedTextRangeAttribute, of: field),
               CFGetTypeID(value) == AXValueGetTypeID()
         else { return nil }
         var range = CFRange()
-        guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.length == 0 else { return nil }
-        return range.location
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range),
+              range.location >= 0, range.location != NSNotFound, range.length >= 0
+        else { return nil }
+        return range
+    }
+
+    private func textLength(in field: AXUIElement) -> Int? {
+        if let count = attribute(kAXNumberOfCharactersAttribute, of: field) as? Int, count >= 0 {
+            return count
+        }
+        return (attribute(kAXValueAttribute, of: field) as? String)?.utf16.count
+    }
+
+    private func caretAtEnd(in field: AXUIElement, requireText: Bool = false) -> Bool {
+        guard let end = textLength(in: field), !requireText || end > 0 else { return false }
+        return insertionPoint(in: field) == end
+    }
+
+    private func moveCaret(to end: Int, in field: AXUIElement) -> Bool {
+        var range = CFRange(location: end, length: 0)
+        guard let value = AXValueCreate(.cfRange, &range) else { return false }
+        return AXUIElementSetAttributeValue(field, kAXSelectedTextRangeAttribute as CFString, value) == .success
     }
 
     private func post(_ text: String, key: CGKeyCode = 0, flags: CGEventFlags = [],

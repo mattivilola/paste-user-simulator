@@ -7,6 +7,7 @@ import Sparkle
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let typing = TypingSession()
+    private lazy var feedback = TypingFeedbackPanel()
     private lazy var hotKey = HotKey { [weak self] in self?.toggleTyping() }
     private var shortcut = Shortcut.standard
     private var shortcutAvailable = false
@@ -112,6 +113,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func toggleTyping() {
         if typing.isRunning {
             typing.stop()
+            feedback.show("Typing stopped", symbol: "stop.circle.fill")
             return
         }
         guard let target = NSWorkspace.shared.frontmostApplication,
@@ -127,6 +129,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         typing.start(text: text, rate: speed, variation: speedVariation, typoRate: typoRate,
                      keepTypingInBackground: keepTypingInBackground, target: target)
+        if typing.isRunning {
+            feedback.show("Typing started", symbol: "keyboard.fill")
+        }
     }
 
     @objc private func refreshClipboard() {
@@ -170,7 +175,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func stopTyping(_ sender: Any?) { typing.stop() }
 
-    @objc private func frontmostAppChanged(_ notification: Notification) { typing.stopForAppSwitch() }
+    @objc private func frontmostAppChanged(_ notification: Notification) { typing.appDidSwitch() }
 
     @objc private func requestAccess() { CGRequestPostEventAccess() }
 
@@ -216,6 +221,68 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.activate()
         } else {
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+}
+
+@MainActor
+private final class TypingFeedbackPanel: NSPanel {
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private var dismissal: Task<Void, Never>?
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 196, height: 44),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        ignoresMouseEvents = true
+        hidesOnDeactivate = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        appearance = NSAppearance(named: .darkAqua)
+
+        let surface = NSVisualEffectView()
+        surface.material = .hudWindow
+        surface.blendingMode = .behindWindow
+        surface.state = .active
+        surface.wantsLayer = true
+        surface.layer?.cornerRadius = 14
+        surface.layer?.masksToBounds = true
+
+        icon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
+        icon.contentTintColor = .labelColor
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        let row = NSStackView(views: [icon, label])
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        surface.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            row.centerYAnchor.constraint(equalTo: surface.centerYAnchor)
+        ])
+        contentView = surface
+    }
+
+    func show(_ message: String, symbol: String) {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? NSScreen.main
+        else { return }
+        dismissal?.cancel()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        label.stringValue = message
+        let visible = screen.visibleFrame
+        setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2, y: visible.maxY - frame.height - 16))
+        orderFrontRegardless()
+        dismissal = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1250))
+            guard !Task.isCancelled else { return }
+            self?.orderOut(nil)
         }
     }
 }
