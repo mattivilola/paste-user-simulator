@@ -7,11 +7,16 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let shortcutButton = ShortcutButton()
     private let message = NSTextField(labelWithString: "")
     private let saveSpeed: (Int) -> Void
+    private let saveTypoRate: (Int) -> Void
+    private let saveBackgroundTyping: (Bool) -> Void
 
-    init(speed: Int, shortcut: Shortcut, saveSpeed: @escaping (Int) -> Void,
-         saveShortcut: @escaping (Shortcut) -> Bool) {
+    init(speed: Int, shortcut: Shortcut, typoRate: Int, keepTypingInBackground: Bool,
+         saveSpeed: @escaping (Int) -> Void, saveTypoRate: @escaping (Int) -> Void,
+         saveBackgroundTyping: @escaping (Bool) -> Void, saveShortcut: @escaping (Shortcut) -> Bool) {
         self.saveSpeed = saveSpeed
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 204),
+        self.saveTypoRate = saveTypoRate
+        self.saveBackgroundTyping = saveBackgroundTyping
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 232),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Paste User Simulator Settings"
@@ -37,7 +42,22 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
 
         let shortcutRow = NSStackView(views: [NSTextField(labelWithString: "Type / Stop"), shortcutButton])
         shortcutRow.spacing = 12
-        let stack = NSStackView(views: [speedLabel, slider, shortcutRow, message])
+        let typos = NSPopUpButton()
+        typos.addItems(withTitles: TypoRate.range.map { $0 == 0 ? "Off" : String($0) })
+        typos.selectItem(at: typoRate)
+        typos.setAccessibilityLabel("Typos per 100 letters")
+        typos.toolTip = "Average number of corrected typos per 100 A–Z letters."
+        typos.target = self
+        typos.action = #selector(typoRateChanged(_:))
+        let typoRow = NSStackView(views: [NSTextField(labelWithString: "Typos per 100 letters"), typos])
+        typoRow.spacing = 12
+
+        let background = NSButton(checkboxWithTitle: "Keep typing after switching apps", target: self,
+                                  action: #selector(backgroundTypingChanged(_:)))
+        background.state = keepTypingInBackground ? .on : .off
+        background.toolTip = "Continues only while the original field keeps focus in its app."
+
+        let stack = NSStackView(views: [speedLabel, slider, typoRow, background, shortcutRow, message])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -60,6 +80,14 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func speedChanged(_ slider: NSSlider) {
         updateSpeedLabel(slider.integerValue)
         saveSpeed(slider.integerValue)
+    }
+
+    @objc private func typoRateChanged(_ popup: NSPopUpButton) {
+        saveTypoRate(popup.indexOfSelectedItem)
+    }
+
+    @objc private func backgroundTypingChanged(_ checkbox: NSButton) {
+        saveBackgroundTyping(checkbox.state == .on)
     }
 
     private func updateSpeedLabel(_ speed: Int) {

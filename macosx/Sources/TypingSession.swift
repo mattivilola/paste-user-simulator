@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 
 enum TypingPace {
     static let range = 60...1200
@@ -12,15 +13,51 @@ enum TypingPace {
     }
 }
 
+enum TypoRate {
+    static let range = 0...10
+    private static let keyboardRows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
+
+    static func replacement(for letter: Character, rate: Int, roll: Int) -> Character? {
+        guard roll < rate, letter.isASCII, letter.isLetter else { return nil }
+        let lowercase = Character(letter.lowercased())
+        for row in keyboardRows {
+            guard let index = row.firstIndex(of: lowercase) else { continue }
+            let next = row.index(after: index)
+            let neighbor = row[next == row.endIndex ? row.index(before: index) : next]
+            return letter.isUppercase ? Character(neighbor.uppercased()) : neighbor
+        }
+        return nil
+    }
+}
+
+struct PendingTypo {
+    private let expectedText: String
+    private let expectedCaret: Int
+
+    init?(text: String, caret: Int, letter: Character) {
+        let text = text as NSString
+        guard (0...text.length).contains(caret) else { return nil }
+        let insertion = String(letter)
+        expectedText = text.replacingCharacters(in: NSRange(location: caret, length: 0), with: insertion)
+        expectedCaret = caret + insertion.utf16.count
+    }
+
+    func canCorrect(text: String?, caret: Int?) -> Bool {
+        guard let text, caret == expectedCaret else { return false }
+        return text.utf16.elementsEqual(expectedText.utf16)
+    }
+}
+
 @MainActor
 final class TypingSession {
     private var task: Task<Void, Never>?
+    private var keepTypingInBackground = false
     var onChange: (() -> Void)?
     var isRunning: Bool { task != nil }
 
     private let modifierMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
 
-    func start(text: String, rate: Int, target: NSRunningApplication) {
+    func start(text: String, rate: Int, typoRate: Int, keepTypingInBackground: Bool, target: NSRunningApplication) {
         let pid = target.processIdentifier
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
@@ -31,6 +68,7 @@ final class TypingSession {
               let source = CGEventSource(stateID: .privateState)
         else { NSSound.beep(); return }
 
+        self.keepTypingInBackground = keepTypingInBackground
         task = Task {
             defer {
                 task = nil
@@ -47,15 +85,46 @@ final class TypingSession {
 
             let content = text.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
-            var characters = content.makeIterator()
-            while let character = characters.next() {
-                guard !Task.isCancelled, !modifiersHeld, CGPreflightPostEventAccess(),
-                      let focused = focusedElement(in: app), CFEqual(focused, field),
-                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-                else { return }
+            @MainActor func canType() async -> Bool {
+                while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess(),
+                      let focused = focusedElement(in: app), CFEqual(focused, field) {
+                    let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+                    if !isFrontmost { return keepTypingInBackground }
+                    if !modifiersHeld { return true }
+                    if !keepTypingInBackground { return false }
 
-                // Send whitespace as Unicode without using the Return or Tab key codes.
-                guard post(String(character), from: source, to: pid) else { return }
+                    // Give app-switch shortcuts time to finish before sending more keys.
+                    try? await Task.sleep(for: .milliseconds(25))
+                }
+                return false
+            }
+
+            for character in content {
+                guard await canType() else { return }
+
+                if typoRate > 0,
+                   let typo = TypoRate.replacement(for: character, rate: typoRate, roll: Int.random(in: 0..<100)),
+                   let caret = insertionPoint(in: field),
+                   let text = attribute(kAXValueAttribute, of: field) as? String,
+                   let pending = PendingTypo(text: text, caret: caret, letter: typo) {
+                    guard await canType(), post(String(typo), from: source, to: pid) else { return }
+                    try? await Task.sleep(for: TypingPace.delay(after: typo, rate: rate) + .milliseconds(100))
+
+                    // Only delete when the field contains the exact insertion we just made.
+                    guard await canType(),
+                          pending.canCorrect(text: attribute(kAXValueAttribute, of: field) as? String,
+                                             caret: insertionPoint(in: field)),
+                          post("\u{7F}", key: CGKeyCode(kVK_Delete), from: source, to: pid)
+                    else { return }
+                }
+
+                if character.isNewline, role == kAXTextAreaRole {
+                    // Rich-text fields can ignore a Unicode newline, but handle Shift-Return.
+                    guard post("\r", key: CGKeyCode(kVK_Return), flags: .maskShift, from: source, to: pid)
+                    else { return }
+                } else {
+                    guard post(String(character), from: source, to: pid) else { return }
+                }
                 try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate))
             }
         }
@@ -63,6 +132,10 @@ final class TypingSession {
     }
 
     func stop() { task?.cancel() }
+
+    func stopForAppSwitch() {
+        if !keepTypingInBackground { stop() }
+    }
 
     private var modifiersHeld: Bool {
         !CGEventSource.flagsState(.combinedSessionState).intersection(modifierMask).isEmpty
@@ -83,13 +156,23 @@ final class TypingSession {
         return value
     }
 
-    private func post(_ text: String, from source: CGEventSource, to pid: pid_t) -> Bool {
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+    private func insertionPoint(in field: AXUIElement) -> Int? {
+        guard let value = attribute(kAXSelectedTextRangeAttribute, of: field),
+              CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.length == 0 else { return nil }
+        return range.location
+    }
+
+    private func post(_ text: String, key: CGKeyCode = 0, flags: CGEventFlags = [],
+                      from source: CGEventSource, to pid: pid_t) -> Bool {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
         else { return false }
         let units = Array(text.utf16)
         for event in [down, up] {
-            event.flags = []
+            event.flags = flags
             units.withUnsafeBufferPointer {
                 event.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress)
             }

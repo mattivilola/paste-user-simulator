@@ -26,6 +26,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return TypingPace.range.contains(stored) ? stored : TypingPace.standard
     }
 
+    private var typoRate: Int {
+        let stored = UserDefaults.standard.integer(forKey: "typosPer100Letters")
+        return TypoRate.range.contains(stored) ? stored : 0
+    }
+
+    private var keepTypingInBackground: Bool {
+        UserDefaults.standard.bool(forKey: "keepTypingInBackground")
+    }
+
     static func main() {
         let app = NSApplication.shared
         let delegate = App()
@@ -50,6 +59,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissionItem.target = self
         menu.addItem(permissionItem)
         menu.addItem(.separator())
+        let aboutItem = menu.addItem(withTitle: "About Paste User Simulator",
+                                     action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
         let settingsItem = menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         if let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String, feed.hasPrefix("https:"),
@@ -65,8 +77,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         let workspace = NSWorkspace.shared.notificationCenter
-        for event in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.willSleepNotification,
-                      NSWorkspace.sessionDidResignActiveNotification] {
+        workspace.addObserver(self, selector: #selector(frontmostAppChanged(_:)),
+                              name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        for event in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             workspace.addObserver(self, selector: #selector(stopTyping(_:)), name: event, object: nil)
         }
 
@@ -107,7 +120,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSSound.beep()
             return
         }
-        typing.start(text: text, rate: speed, target: target)
+        typing.start(text: text, rate: speed, typoRate: typoRate,
+                     keepTypingInBackground: keepTypingInBackground, target: target)
     }
 
     @objc private func refreshClipboard() {
@@ -144,14 +158,31 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func stopTyping(_ sender: Any?) { typing.stop() }
 
+    @objc private func frontmostAppChanged(_ notification: Notification) { typing.stopForAppSwitch() }
+
     @objc private func requestAccess() { CGRequestPostEventAccess() }
 
     @objc private func checkForUpdates() { updater?.checkForUpdates(nil) }
 
+    @objc private func showAbout() {
+        activateApp()
+        let credits = NSAttributedString(
+            string: "Created with ❤️ by Matti Vilola.\nDistributed and sponsored by ILO APPLICATIONS SL.",
+            attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+        )
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+
     @objc private func showSettings() {
         if settings == nil {
-            settings = SettingsWindow(speed: speed, shortcut: shortcut, saveSpeed: {
+            settings = SettingsWindow(speed: speed, shortcut: shortcut, typoRate: typoRate,
+                                      keepTypingInBackground: keepTypingInBackground, saveSpeed: {
                 UserDefaults.standard.set($0, forKey: "charactersPerMinute")
+            }, saveTypoRate: {
+                UserDefaults.standard.set($0, forKey: "typosPer100Letters")
+            }, saveBackgroundTyping: { [weak self] enabled in
+                UserDefaults.standard.set(enabled, forKey: "keepTypingInBackground")
+                if !enabled { self?.typing.stop() }
             }, saveShortcut: { [weak self] candidate in
                 guard let self, hotKey.register(candidate) else { return false }
                 shortcut = candidate
@@ -161,12 +192,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return true
             })
         }
+        activateApp()
+        settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func activateApp() {
         if #available(macOS 14, *) {
             NSApp.activate()
         } else {
             NSApp.activate(ignoringOtherApps: true)
         }
-        settings?.showWindow(nil)
-        settings?.window?.makeKeyAndOrderFront(nil)
     }
 }
