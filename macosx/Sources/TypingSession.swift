@@ -63,6 +63,7 @@ final class TypingSession {
     private var keepTypingInBackground = false
     var onChange: (() -> Void)?
     var isRunning: Bool { task != nil }
+    private(set) var isWaitingForTarget = false
 
     private let modifierMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
 
@@ -82,6 +83,7 @@ final class TypingSession {
         task = Task {
             defer {
                 task = nil
+                isWaitingForTarget = false
                 onChange?()
             }
 
@@ -96,15 +98,30 @@ final class TypingSession {
             let content = text.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
             @MainActor func canType() async -> Bool {
-                while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess(),
-                      let focused = focusedElement(in: app), CFEqual(focused, field) {
+                var refocusDeadline: ContinuousClock.Instant?
+                while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
+                    let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
                     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-                    if !isFrontmost { return keepTypingInBackground }
-                    if !modifiersHeld { return true }
-                    if !keepTypingInBackground { return false }
 
-                    // Give app-switch shortcuts time to finish before sending more keys.
-                    try? await Task.sleep(for: .milliseconds(25))
+                    if !isFrontmost {
+                        guard keepTypingInBackground else { return false }
+                        if hasOriginalFocus && !isWaitingForTarget { return true }
+                        // Some apps stop exposing their focused field when they become inactive.
+                        setWaitingForTarget(true)
+                        refocusDeadline = nil
+                    } else if hasOriginalFocus {
+                        setWaitingForTarget(false)
+                        if !modifiersHeld { return true }
+                        // Give app-switch shortcuts time to finish before sending more keys.
+                        guard keepTypingInBackground else { return false }
+                    } else {
+                        guard isWaitingForTarget else { return false }
+                        let deadline = refocusDeadline ?? clock.now + .milliseconds(500)
+                        guard clock.now < deadline else { return false }
+                        refocusDeadline = deadline
+                    }
+
+                    try? await Task.sleep(for: isWaitingForTarget ? .milliseconds(150) : .milliseconds(25))
                 }
                 return false
             }
@@ -143,6 +160,12 @@ final class TypingSession {
     }
 
     func stop() { task?.cancel() }
+
+    private func setWaitingForTarget(_ waiting: Bool) {
+        guard isWaitingForTarget != waiting else { return }
+        isWaitingForTarget = waiting
+        onChange?()
+    }
 
     func stopForAppSwitch() {
         if !keepTypingInBackground { stop() }

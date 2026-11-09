@@ -20,7 +20,7 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 **Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If typing is interrupted mid-correction, check the last letter.
 
-**Keep typing after switching apps** lets you work in another app while typing continues in the original field. The destination must keep that field focused in its own window and accept background keystrokes. The type/stop shortcut works from either app.
+**Keep typing after switching apps** lets you work in another app while typing continues in the original field. The destination must keep that field focused in its own window and accept background keystrokes. If macOS stops reporting the original field while the destination is inactive, typing pauses and resumes when that field regains focus. The type/stop shortcut works from either app.
 
 The app uses Shift-Return for line breaks in multiline fields.
 

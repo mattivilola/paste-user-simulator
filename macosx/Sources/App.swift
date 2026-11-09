@@ -140,7 +140,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshStatus() {
         let running = typing.isRunning
         let description: String
-        if running {
+        if typing.isWaitingForTarget {
+            description = "Paused · Return to the original field"
+        } else if running {
             description = "Typing · \(shortcut.displayName) to stop"
         } else if !shortcutAvailable {
             description = "Shortcut unavailable · Open Settings"
@@ -150,7 +152,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             description = "No text on clipboard"
         }
 
-        let symbol = running ? "keyboard.fill" : hasText ? "doc.on.clipboard.fill" : "doc.on.clipboard"
+        let symbol: String
+        if typing.isWaitingForTarget {
+            symbol = "pause.circle"
+        } else {
+            symbol = running ? "keyboard.fill" : hasText ? "doc.on.clipboard.fill" : "doc.on.clipboard"
+        }
         let button = statusItem.button
         button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
         button?.image?.isTemplate = true
