@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9EBC1A6C3EE248E590B73AC8 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 9EBC1A6C3EE248E590B73AC9 /* AppIcon.icns */; };
 		047DD84E0EA024171BABA471 /* TypingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08CB44968585515F8CE6213E /* TypingSession.swift */; };
 		1B7D628F2ADA82B94EDB3A3F /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B6E2263DDF29E188058C78 /* SettingsWindow.swift */; };
 		1F92AF39D926E9CC592083F1 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 9825CBB012688E7EE250B84F /* Sparkle */; };
@@ -15,6 +16,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		9EBC1A6C3EE248E590B73AC9 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; name = AppIcon.icns; path = Resources/AppIcon.icns; sourceTree = "<group>"; };
 		08CB44968585515F8CE6213E /* TypingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingSession.swift; sourceTree = "<group>"; };
 		2A8C2A5941021F454AEBB61B /* HotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		81AE7A47C9727F40C9B37C3C /* PasteUserSimulator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PasteUserSimulator.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -57,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				0947BF9DE0AA3622B1CDA64F /* Sources */,
+				9EBC1A6C3EE248E590B73AC9 /* AppIcon.icns */,
 				3CCA2E95D9FC0E4C63420204 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -70,6 +73,7 @@
 			buildPhases = (
 				AC300FE19BE1F9DE29651B39 /* Sources */,
 				783965B88ED2A271A0176F0E /* Frameworks */,
+				9EBC1A6C3EE248E590B73ACA /* Resources */,
 			);
 			buildRules = (
 			);
@@ -119,6 +123,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		9EBC1A6C3EE248E590B73ACA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9EBC1A6C3EE248E590B73AC8 /* AppIcon.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		AC300FE19BE1F9DE29651B39 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -137,16 +152,15 @@
 		0558596C5CA27C408A440777 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.iloapps.paste-user-simulator";
 				PRODUCT_NAME = "Paste User Simulator";
 				SDKROOT = macosx;
@@ -157,16 +171,15 @@
 		2F267C45D3F705D7F89F5B77 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.iloapps.paste-user-simulator.debug";
 				PRODUCT_NAME = "Paste User Simulator";
 				SDKROOT = macosx;
