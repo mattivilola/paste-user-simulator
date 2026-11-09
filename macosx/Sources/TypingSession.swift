@@ -82,9 +82,10 @@ final class TypingSession {
 
         let initialRange = keepTypingInBackground ? selectedRange(in: field) : nil
         let initialLength = keepTypingInBackground ? textLength(in: field) : nil
-        var appendConfirmed = initialRange?.length == 0 && initialRange?.location == initialLength
         // An empty editor has only one insertion point, even if its range is not exposed yet.
-        appendConfirmed = appendConfirmed || (initialLength == 0 && initialRange == nil)
+        let startedEmpty = initialLength == 0 &&
+            (initialRange == nil || (initialRange?.length == 0 && initialRange?.location == 0))
+        var appendConfirmed = startedEmpty || (initialRange?.length == 0 && initialRange?.location == initialLength)
         var initialTextToVerify: String?
         if keepTypingInBackground && !appendConfirmed &&
             (initialRange == nil || (initialRange?.location == 0 && initialRange?.length == 0)) {
@@ -109,18 +110,40 @@ final class TypingSession {
 
             let content = text.replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
-            var expectedFirstAppend: String?
+            var pendingFirstAppend: (initial: String, inserted: String, deadline: ContinuousClock.Instant)?
+            var hasPostedKey = false
             @MainActor func canType() async -> Bool {
                 var requestedCaretMove = false
                 while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
                     let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
                     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
 
+                    if hasOriginalFocus, let pending = pendingFirstAppend {
+                        if let current = attribute(kAXValueAttribute, of: field) as? String,
+                           !current.utf16.elementsEqual(pending.initial.utf16) {
+                            let appended = pending.initial + pending.inserted
+                            // Some empty rich-text editors expose a one-unit placeholder
+                            // that the first real character replaces.
+                            appendConfirmed = current.utf16.elementsEqual(appended.utf16) ||
+                                (pending.initial.utf16.count == 1 && current.utf16.elementsEqual(pending.inserted.utf16))
+                            canContinueAcrossApps = appendConfirmed
+                            pendingFirstAppend = nil
+                        } else if clock.now < pending.deadline {
+                            try? await Task.sleep(for: .milliseconds(25))
+                            continue
+                        } else if isFrontmost && !hasSwitchedApps {
+                            // Keep foreground typing usable if the editor can't confirm the first key.
+                            canContinueAcrossApps = false
+                            pendingFirstAppend = nil
+                        }
+                    }
+
                     if !isFrontmost {
                         guard canContinueAcrossApps else { return false }
                         hasSwitchedApps = true
-                        if appendConfirmed && hasOriginalFocus && !isWaitingForTarget &&
+                        if appendConfirmed && hasOriginalFocus &&
                             caretAtEnd(in: field, requireText: true) {
+                            setWaitingForTarget(false)
                             return true
                         }
                         // Some apps stop exposing their focused field when they become inactive.
@@ -133,17 +156,15 @@ final class TypingSession {
                             try? await Task.sleep(for: .milliseconds(25))
                             continue
                         }
-                        if !appendConfirmed, let expected = expectedFirstAppend,
-                           let current = attribute(kAXValueAttribute, of: field) as? String {
-                            appendConfirmed = current.utf16.elementsEqual(expected.utf16)
-                            canContinueAcrossApps = appendConfirmed
-                            expectedFirstAppend = nil
-                        } else if canContinueAcrossApps && !appendConfirmed && hasSwitchedApps &&
-                                    expectedFirstAppend == nil &&
-                                    caretAtEnd(in: field) {
+                        if canContinueAcrossApps && !appendConfirmed && hasSwitchedApps &&
+                            pendingFirstAppend == nil && caretAtEnd(in: field) {
                             appendConfirmed = true
                         }
-                        if !hasSwitchedApps || (appendConfirmed && caretAtEnd(in: field)) {
+                        // If the user switched away before the first key, the original
+                        // empty field can still be resumed without a reported caret.
+                        let canStartInEmptyField = startedEmpty && !hasPostedKey &&
+                            textLength(in: field) == 0 && selectedRange(in: field) == nil
+                        if !hasSwitchedApps || (appendConfirmed && (caretAtEnd(in: field) || canStartInEmptyField)) {
                             setWaitingForTarget(false)
                             return true
                         }
@@ -176,6 +197,7 @@ final class TypingSession {
                    let text = attribute(kAXValueAttribute, of: field) as? String,
                    let pending = PendingTypo(text: text, caret: caret, letter: typo) {
                     guard await canType(), post(String(typo), from: source, to: pid) else { return }
+                    hasPostedKey = true
                     let pause = TypingPace.delay(after: typo, rate: rate, variation: variation)
                     try? await Task.sleep(for: pause + .milliseconds(100))
 
@@ -194,8 +216,9 @@ final class TypingSession {
                 } else {
                     guard post(String(character), from: source, to: pid) else { return }
                 }
+                hasPostedKey = true
                 if let initial = initialTextToVerify {
-                    expectedFirstAppend = initial + String(character)
+                    pendingFirstAppend = (initial, String(character), clock.now + .milliseconds(250))
                     initialTextToVerify = nil
                 }
                 try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate, variation: variation))

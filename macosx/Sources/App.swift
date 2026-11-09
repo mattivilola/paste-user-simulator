@@ -130,7 +130,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         typing.start(text: text, rate: speed, variation: speedVariation, typoRate: typoRate,
                      keepTypingInBackground: keepTypingInBackground, target: target)
         if typing.isRunning {
-            feedback.show("Typing started", symbol: "keyboard.fill")
+            feedback.show("Typing started", symbol: "keyboard.fill", hint: "Keep the original field focused")
         }
     }
 
@@ -229,6 +229,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 private final class TypingFeedbackPanel: NSPanel {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let hintLabel = NSTextField(labelWithString: "")
     private var dismissal: Task<Void, Never>?
 
     override var canBecomeKey: Bool { false }
@@ -260,27 +261,36 @@ private final class TypingFeedbackPanel: NSPanel {
         let row = NSStackView(views: [icon, label])
         row.alignment = .centerY
         row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        surface.addSubview(row)
+        hintLabel.font = .systemFont(ofSize: 12)
+        hintLabel.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [row, hintLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        surface.addSubview(stack)
         NSLayoutConstraint.activate([
-            row.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            row.centerYAnchor.constraint(equalTo: surface.centerYAnchor)
+            stack.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: surface.centerYAnchor)
         ])
         contentView = surface
     }
 
-    func show(_ message: String, symbol: String) {
+    func show(_ message: String, symbol: String, hint: String? = nil) {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
                 ?? NSScreen.main
         else { return }
         dismissal?.cancel()
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         label.stringValue = message
+        hintLabel.stringValue = hint ?? ""
+        hintLabel.isHidden = hint == nil
+        setContentSize(hint == nil ? NSSize(width: 196, height: 44) : NSSize(width: 240, height: 62))
         let visible = screen.visibleFrame
         setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2, y: visible.maxY - frame.height - 16))
         orderFrontRegardless()
         dismissal = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1250))
+            try? await Task.sleep(for: .milliseconds(hint == nil ? 1250 : 2200))
             guard !Task.isCancelled else { return }
             self?.orderOut(nil)
         }
