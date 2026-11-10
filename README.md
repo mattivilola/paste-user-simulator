@@ -22,6 +22,8 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 **Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. If the field or caret cannot be verified, typing waits for the original field. If it stays paused when you return, click at the end of that field. The type/stop shortcut works from either app.
 
+If an editor shows **No text field detected**, turn on **Compatibility Mode** in Settings, click inside the editor, and press the typing shortcut again. When an app exposes only a container around its editor, Compatibility Mode types in that window while it stays active. In this mode, clicking, pressing a key, or changing focus stops typing, and simulated typos are off. Text fields that macOS can identify keep their usual behavior.
+
 The app uses Shift-Return for line breaks in multiline fields.
 
 The app reads text when you open the menu for a preview or trigger the shortcut to type. It keeps no clipboard history and sends no clipboard data over the network. Input behavior can vary by app and text field.

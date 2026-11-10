@@ -43,6 +43,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.bool(forKey: "keepTypingInBackground")
     }
 
+    private var allowCompatibilityTyping: Bool {
+        UserDefaults.standard.bool(forKey: "allowCompatibilityTyping")
+    }
+
     static func main() {
         let app = NSApplication.shared
         let delegate = App()
@@ -142,9 +146,14 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         typing.start(text: text, rate: speed, variation: speedVariation, typoRate: typoRate,
-                     keepTypingInBackground: keepTypingInBackground, target: target)
+                     keepTypingInBackground: keepTypingInBackground,
+                     allowCompatibilityTyping: allowCompatibilityTyping, target: target)
         if typing.isRunning {
             feedback.show("Typing started", symbol: "keyboard.fill", hint: "Keep the original field focused")
+        } else {
+            let hint = allowCompatibilityTyping ? "Click inside the field and try again" :
+                "Try Compatibility Mode in Settings"
+            feedback.show("No text field detected", symbol: "keyboard", hint: hint)
         }
     }
 
@@ -232,7 +241,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showSettings() {
         if settings == nil {
             settings = SettingsWindow(speed: speed, speedVariation: speedVariation, shortcut: shortcut, typoRate: typoRate,
-                                      keepTypingInBackground: keepTypingInBackground, saveSpeed: {
+                                      keepTypingInBackground: keepTypingInBackground,
+                                      allowCompatibilityTyping: allowCompatibilityTyping, saveSpeed: {
                 UserDefaults.standard.set($0, forKey: "charactersPerMinute")
             }, saveSpeedVariation: {
                 UserDefaults.standard.set($0.rawValue, forKey: "typingVariationPercent")
@@ -240,6 +250,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 UserDefaults.standard.set($0, forKey: "typosPer100Letters")
             }, saveBackgroundTyping: { [weak self] enabled in
                 UserDefaults.standard.set(enabled, forKey: "keepTypingInBackground")
+                if !enabled { self?.typing.stop() }
+            }, saveCompatibilityTyping: { [weak self] enabled in
+                UserDefaults.standard.set(enabled, forKey: "allowCompatibilityTyping")
                 if !enabled { self?.typing.stop() }
             }, saveShortcut: { [weak self] candidate in
                 guard let self, hotKey.register(candidate) else { return false }

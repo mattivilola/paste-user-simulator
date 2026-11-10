@@ -67,19 +67,32 @@ final class TypingSession {
     private(set) var isWaitingForTarget = false
 
     private let modifierMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
+    private let textRoles = [kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole]
+    private let opaqueRoles = ["AXWebArea", kAXGroupRole]
 
     func start(text: String, rate: Int, variation: TypingPace.Variation, typoRate: Int,
-               keepTypingInBackground: Bool, target: NSRunningApplication) {
+               keepTypingInBackground: Bool, allowCompatibilityTyping: Bool, target: NSRunningApplication) {
         let pid = target.processIdentifier
+        let initialInput = allowCompatibilityTyping ? hardwareInputCounts() : nil
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
-        let textRoles = [kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole]
         guard task == nil, let field = focusedElement(in: app),
-              let role = attribute(kAXRoleAttribute, of: field) as? String, textRoles.contains(role),
+              let role = attribute(kAXRoleAttribute, of: field) as? String,
               attribute(kAXSubroleAttribute, of: field) as? String != kAXSecureTextFieldSubrole,
               let source = CGEventSource(stateID: .privateState)
         else { NSSound.beep(); return }
 
+        let compatibilityWindow: AXUIElement?
+        if textRoles.contains(role) {
+            compatibilityWindow = nil
+        } else if allowCompatibilityTyping, opaqueRoles.contains(role), !IsSecureEventInputEnabled(),
+                  let window = elementAttribute(kAXFocusedWindowAttribute, of: app) {
+            compatibilityWindow = window
+        } else {
+            NSSound.beep()
+            return
+        }
+        let keepTypingInBackground = keepTypingInBackground && compatibilityWindow == nil
         let initialRange = keepTypingInBackground ? selectedRange(in: field) : nil
         let initialLength = keepTypingInBackground ? textLength(in: field) : nil
         // An empty editor has only one insertion point, even if its range is not exposed yet.
@@ -116,6 +129,13 @@ final class TypingSession {
                 var requestedCaretMove = false
                 while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
                     let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
+                    if let window = compatibilityWindow {
+                        // The app exposed a container. Stop on new user input even if its AX focus stays the same.
+                        return hasOriginalFocus &&
+                            elementAttribute(kAXFocusedWindowAttribute, of: app).map { CFEqual($0, window) } == true &&
+                            initialInput == hardwareInputCounts() && !modifiersHeld && !IsSecureEventInputEnabled() &&
+                            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+                    }
                     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
 
                     if hasOriginalFocus, let pending = pendingFirstAppend {
@@ -191,7 +211,7 @@ final class TypingSession {
             for character in content {
                 guard await canType() else { return }
 
-                if typoRate > 0,
+                if compatibilityWindow == nil, typoRate > 0,
                    let typo = TypoRate.replacement(for: character, rate: typoRate, roll: Int.random(in: 0..<100)),
                    let caret = insertionPoint(in: field),
                    let text = attribute(kAXValueAttribute, of: field) as? String,
@@ -209,7 +229,7 @@ final class TypingSession {
                     else { return }
                 }
 
-                if character.isNewline, role == kAXTextAreaRole {
+                if character.isNewline, role == kAXTextAreaRole || compatibilityWindow != nil {
                     // Rich-text fields can ignore a Unicode newline, but handle Shift-Return.
                     guard post("\r", key: CGKeyCode(kVK_Return), flags: .maskShift, from: source, to: pid)
                     else { return }
@@ -248,8 +268,17 @@ final class TypingSession {
         !CGEventSource.flagsState(.combinedSessionState).intersection(modifierMask).isEmpty
     }
 
+    private func hardwareInputCounts() -> [UInt32] {
+        let events: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        return events.map { CGEventSource.counterForEventType(.hidSystemState, eventType: $0) }
+    }
+
     private func focusedElement(in app: AXUIElement) -> AXUIElement? {
-        guard let value = attribute(kAXFocusedUIElementAttribute, of: app),
+        elementAttribute(kAXFocusedUIElementAttribute, of: app)
+    }
+
+    private func elementAttribute(_ name: String, of element: AXUIElement) -> AXUIElement? {
+        guard let value = attribute(name, of: element),
               CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
         return (value as! AXUIElement)

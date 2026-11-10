@@ -10,16 +10,19 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let saveSpeedVariation: (TypingPace.Variation) -> Void
     private let saveTypoRate: (Int) -> Void
     private let saveBackgroundTyping: (Bool) -> Void
+    private let saveCompatibilityTyping: (Bool) -> Void
 
     init(speed: Int, speedVariation: TypingPace.Variation, shortcut: Shortcut, typoRate: Int,
-         keepTypingInBackground: Bool, saveSpeed: @escaping (Int) -> Void,
+         keepTypingInBackground: Bool, allowCompatibilityTyping: Bool, saveSpeed: @escaping (Int) -> Void,
          saveSpeedVariation: @escaping (TypingPace.Variation) -> Void, saveTypoRate: @escaping (Int) -> Void,
-         saveBackgroundTyping: @escaping (Bool) -> Void, saveShortcut: @escaping (Shortcut) -> Bool) {
+         saveBackgroundTyping: @escaping (Bool) -> Void, saveCompatibilityTyping: @escaping (Bool) -> Void,
+         saveShortcut: @escaping (Shortcut) -> Bool) {
         self.saveSpeed = saveSpeed
         self.saveSpeedVariation = saveSpeedVariation
         self.saveTypoRate = saveTypoRate
         self.saveBackgroundTyping = saveBackgroundTyping
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 268),
+        self.saveCompatibilityTyping = saveCompatibilityTyping
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 300),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Paste User Simulator Settings"
@@ -79,7 +82,13 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         background.state = keepTypingInBackground ? .on : .off
         background.toolTip = "Continues only while the original field keeps focus in its app."
 
-        let stack = NSStackView(views: [speedLabel, slider, variationRow, typoRow, background, shortcutRow, message])
+        let compatibility = NSButton(checkboxWithTitle: "Compatibility Mode", target: self,
+                                     action: #selector(compatibilityTypingChanged(_:)))
+        compatibility.state = allowCompatibilityTyping ? .on : .off
+        compatibility.toolTip = "Type in the active window when an editor does not expose its text field."
+
+        let stack = NSStackView(views: [speedLabel, slider, variationRow, typoRow, background, compatibility,
+                                       shortcutRow, message])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -116,6 +125,10 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
 
     @objc private func backgroundTypingChanged(_ checkbox: NSButton) {
         saveBackgroundTyping(checkbox.state == .on)
+    }
+
+    @objc private func compatibilityTypingChanged(_ checkbox: NSButton) {
+        saveCompatibilityTyping(checkbox.state == .on)
     }
 
     private func updateSpeedLabel(_ speed: Int) {
