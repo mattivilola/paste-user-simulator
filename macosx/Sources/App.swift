@@ -7,7 +7,8 @@ import Sparkle
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let typing = TypingSession()
-    private lazy var feedback = TypingFeedbackPanel()
+    private lazy var feedback = TypingFeedbackPanel(onResume: { [weak self] in self?.resumeTyping() },
+                                                   onStop: { [weak self] in self?.stopTyping(nil) })
     private lazy var hotKey = HotKey { [weak self] in self?.toggleTyping() }
     private var shortcut = Shortcut.standard
     private var shortcutAvailable = false
@@ -61,7 +62,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcut = stored
         }
         shortcutAvailable = hotKey.register(shortcut)
-        typing.onChange = { [weak self] in self?.refreshStatus() }
+        typing.onChange = { [weak self] in self?.typingChanged() }
 
         let menu = NSMenu()
         menu.delegate = self
@@ -129,9 +130,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func toggleTyping() {
-        if typing.isRunning {
-            typing.stop()
-            feedback.show("Typing stopped", symbol: "stop.circle.fill")
+        if let progress = typing.progress {
+            if progress.phase == .typing { stopTyping(nil) }
+            else { resumeTyping() }
             return
         }
         guard let target = NSWorkspace.shared.frontmostApplication,
@@ -148,9 +149,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         typing.start(text: text, rate: speed, variation: speedVariation, typoRate: typoRate,
                      keepTypingInBackground: keepTypingInBackground,
                      allowCompatibilityTyping: allowCompatibilityTyping, target: target)
-        if typing.isRunning {
-            feedback.show("Typing started", symbol: "keyboard.fill", hint: "Keep the original field focused")
-        } else {
+        if typing.progress == nil {
             let hint = allowCompatibilityTyping ? "Click inside the field and try again" :
                 "Try Compatibility Mode in Settings"
             feedback.show("No text field detected", symbol: "keyboard", hint: hint)
@@ -191,12 +190,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshStatus() {
-        let running = typing.isRunning
+        let progress = typing.progress
+        let paused = progress.map { $0.phase != .typing } ?? false
         let description: String
-        if typing.isWaitingForTarget {
-            description = "Paused · Focus the original field at its end"
-        } else if running {
-            description = "Typing · \(shortcut.displayName) to stop"
+        if let progress {
+            let state = paused ? "Paused" : "Typing"
+            description = "\(state) · \(progress.appName) · \(progress.percent)%"
         } else if !shortcutAvailable {
             description = "Shortcut unavailable · Open Settings"
         } else if hasText {
@@ -206,10 +205,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let symbol: String
-        if typing.isWaitingForTarget {
+        if paused {
             symbol = "pause.circle"
         } else {
-            symbol = running ? "keyboard.fill" : hasText ? "doc.on.clipboard.fill" : "doc.on.clipboard"
+            symbol = progress != nil ? "keyboard.fill" : hasText ? "doc.on.clipboard.fill" : "doc.on.clipboard"
         }
         let button = statusItem.button
         button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
@@ -218,12 +217,29 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button?.setAccessibilityLabel("Paste User Simulator")
         button?.setAccessibilityValue(description)
         summaryItem.title = description
-        stopItem.isHidden = !running
+        stopItem.isHidden = progress == nil
+    }
+
+    private func typingChanged() {
+        refreshStatus()
+        if let progress = typing.progress {
+            feedback.update(progress, shortcut: shortcut.displayName)
+        } else {
+            feedback.finishSession()
+        }
+    }
+
+    private func resumeTyping() {
+        if !typing.requestResume() { NSSound.beep() }
     }
 
     @objc private func stopTyping(_ sender: Any?) { typing.stop() }
 
-    @objc private func frontmostAppChanged(_ notification: Notification) { typing.appDidSwitch() }
+    @objc private func frontmostAppChanged(_ notification: Notification) {
+        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            typing.appDidSwitch(to: app.processIdentifier)
+        }
+    }
 
     @objc private func requestAccess() { CGRequestPostEventAccess() }
 
@@ -282,17 +298,27 @@ private final class TypingFeedbackPanel: NSPanel {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
+    private let progressBar = NSProgressIndicator()
+    private let countLabel = NSTextField(labelWithString: "")
+    private let resumeButton = PanelButton()
+    private let stopButton = PanelButton()
+    private let onResume: () -> Void
+    private let onStop: () -> Void
     private var dismissal: Task<Void, Never>?
+    private var session: TypingSession.Progress?
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    init() {
+    init(onResume: @escaping () -> Void, onStop: @escaping () -> Void) {
+        self.onResume = onResume
+        self.onStop = onStop
         super.init(contentRect: NSRect(x: 0, y: 0, width: 196, height: 44),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         ignoresMouseEvents = true
+        becomesKeyOnlyIfNeeded = true
         hidesOnDeactivate = false
         isOpaque = false
         backgroundColor = .clear
@@ -310,12 +336,25 @@ private final class TypingFeedbackPanel: NSPanel {
         icon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
         icon.contentTintColor = .labelColor
         label.font = .systemFont(ofSize: 14, weight: .semibold)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = NSStackView(views: [icon, label])
         row.alignment = .centerY
         row.spacing = 8
         hintLabel.font = .systemFont(ofSize: 12)
         hintLabel.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [row, hintLabel])
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.controlSize = .small
+        progressBar.widthAnchor.constraint(equalToConstant: 292).isActive = true
+        progressBar.setAccessibilityLabel("Typing progress")
+        countLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        countLabel.textColor = .secondaryLabelColor
+        configure(resumeButton, symbol: "play.fill", title: "Resume typing", action: #selector(resume))
+        configure(stopButton, symbol: "stop.fill", title: "Stop typing", action: #selector(stop))
+        row.addArrangedSubview(resumeButton)
+        row.addArrangedSubview(stopButton)
+        let stack = NSStackView(views: [row, progressBar, countLabel, hintLabel])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 4
@@ -323,28 +362,97 @@ private final class TypingFeedbackPanel: NSPanel {
         surface.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: surface.centerYAnchor)
+            stack.centerYAnchor.constraint(equalTo: surface.centerYAnchor),
+            row.widthAnchor.constraint(lessThanOrEqualTo: surface.widthAnchor, constant: -28)
         ])
         contentView = surface
     }
 
     func show(_ message: String, symbol: String, hint: String? = nil) {
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
-                ?? NSScreen.main
-        else { return }
         dismissal?.cancel()
+        ignoresMouseEvents = true
+        progressBar.isHidden = true
+        countLabel.isHidden = true
+        resumeButton.isHidden = true
+        stopButton.isHidden = true
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         label.stringValue = message
         hintLabel.stringValue = hint ?? ""
         hintLabel.isHidden = hint == nil
         setContentSize(hint == nil ? NSSize(width: 196, height: 44) : NSSize(width: 240, height: 62))
-        let visible = screen.visibleFrame
-        setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2, y: visible.maxY - frame.height - 16))
-        orderFrontRegardless()
+        present()
         dismissal = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(hint == nil ? 1250 : 2200))
             guard !Task.isCancelled else { return }
             self?.orderOut(nil)
         }
     }
+
+    func update(_ progress: TypingSession.Progress, shortcut: String) {
+        let isNew = session == nil
+        let phaseChanged = session?.phase != progress.phase
+        session = progress
+        if isNew || phaseChanged {
+            dismissal?.cancel()
+            ignoresMouseEvents = false
+            let typing = progress.phase == .typing
+            icon.image = NSImage(systemSymbolName: typing ? "keyboard.fill" : "pause.circle.fill",
+                                 accessibilityDescription: nil)
+            label.stringValue = "\(typing ? "Typing in" : "Paused in") \(progress.appName)"
+            hintLabel.stringValue = switch progress.phase {
+            case .typing: "\(shortcut) to stop"
+            case .waitingForTarget: "Return to the original field to continue"
+            case .paused: "Refocus the original field · \(shortcut) to resume"
+            case .checkLastCharacter: "Check the last character, then resume"
+            }
+            hintLabel.isHidden = false
+            progressBar.isHidden = false
+            countLabel.isHidden = false
+            resumeButton.isHidden = typing
+            stopButton.isHidden = false
+            if isNew { setContentSize(NSSize(width: 324, height: 106)) }
+        }
+        progressBar.maxValue = Double(progress.total)
+        progressBar.doubleValue = Double(progress.typed)
+        countLabel.stringValue = "\(progress.typed.formatted()) / \(progress.total.formatted()) characters · \(progress.percent)%"
+        if isNew { present() }
+    }
+
+    func finishSession() {
+        guard let session else { return }
+        self.session = nil
+        if session.typed == session.total {
+            show("Typing complete", symbol: "checkmark.circle.fill")
+        } else {
+            show("Typing stopped", symbol: "stop.circle.fill")
+        }
+    }
+
+    private func configure(_ button: NSButton, symbol: String, title: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .smallSquare
+        button.isBordered = false
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        button.target = self
+        button.action = action
+        button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+    }
+
+    @objc private func resume() { onResume() }
+    @objc private func stop() { onStop() }
+
+    private func present() {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2, y: visible.maxY - frame.height - 16))
+        orderFrontRegardless()
+    }
+}
+
+private final class PanelButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

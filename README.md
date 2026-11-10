@@ -12,7 +12,7 @@ Download the ZIP from [GitHub Releases](https://github.com/mattivilola/paste-use
 
 1. Open the app and copy some text. The menu bar clipboard icon fills when text is available. Open the menu to preview up to four lines.
 2. Focus a text field and press **⌘⌥V**. On first use, allow Paste User Simulator in **System Settings → Privacy & Security → Accessibility**. Then return to your text field and press the shortcut again.
-3. Press the same shortcut again to stop. A brief indicator confirms when the shortcut starts or stops typing.
+3. The floating status box shows the destination app, character count, and progress. Press the shortcut again while typing to stop, or use the stop button. To resume a paused session, refocus the original field and press the shortcut or click the play button.
 
 Open **Settings** from the menu bar to change the shortcut or speed. The default is 300 characters per minute.
 
@@ -20,9 +20,9 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 **Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If typing is interrupted mid-correction, check the last letter.
 
-**Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. If the field or caret cannot be verified, typing waits for the original field. If it stays paused when you return, click at the end of that field. The type/stop shortcut works from either app.
+**Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. Otherwise, the session keeps its place and waits. Returning to the original field with the caret at its end resumes a session that started there. You can also refocus the original field, place the caret where you want to continue, and resume manually.
 
-If an editor shows **No text field detected**, turn on **Compatibility Mode** in Settings, click inside the editor, and press the typing shortcut again. When an app exposes only a container around its editor, Compatibility Mode types in that window while it stays active. In this mode, clicking, pressing a key, or changing focus stops typing, and simulated typos are off. Text fields that macOS can identify keep their usual behavior.
+If an editor shows **No text field detected**, turn on **Compatibility Mode** in Settings, click inside the editor, and press the typing shortcut again. When an app exposes only a container around its editor, Compatibility Mode types in that window while it stays active. Clicking, pressing a key, or changing focus pauses typing. Refocus the original editor, check the caret, and resume. Simulated typos are off in this mode.
 
 The app uses Shift-Return for line breaks in multiline fields.
 

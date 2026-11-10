@@ -59,12 +59,25 @@ struct PendingTypo {
 
 @MainActor
 final class TypingSession {
+    enum Phase: Equatable {
+        case typing, waitingForTarget, paused, checkLastCharacter
+    }
+
+    struct Progress {
+        let appName: String
+        let total: Int
+        var typed = 0
+        var phase = Phase.typing
+
+        var percent: Int { typed * 100 / total }
+    }
+
     private var task: Task<Void, Never>?
-    private var canContinueAcrossApps = false
-    private var hasSwitchedApps = false
+    private var targetPID: pid_t?
+    private var leftTargetApp = false
+    private var resumeRequested = false
     var onChange: (() -> Void)?
-    var isRunning: Bool { task != nil }
-    private(set) var isWaitingForTarget = false
+    private(set) var progress: Progress?
 
     private let modifierMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
     private let textRoles = [kAXTextAreaRole, kAXTextFieldRole, kAXComboBoxRole]
@@ -73,137 +86,135 @@ final class TypingSession {
     func start(text: String, rate: Int, variation: TypingPace.Variation, typoRate: Int,
                keepTypingInBackground: Bool, allowCompatibilityTyping: Bool, target: NSRunningApplication) {
         let pid = target.processIdentifier
-        let initialInput = allowCompatibilityTyping ? hardwareInputCounts() : nil
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
-        guard task == nil, let field = focusedElement(in: app),
+        guard task == nil, !text.isEmpty, let field = focusedElement(in: app),
               let role = attribute(kAXRoleAttribute, of: field) as? String,
               attribute(kAXSubroleAttribute, of: field) as? String != kAXSecureTextFieldSubrole,
               let source = CGEventSource(stateID: .privateState)
         else { NSSound.beep(); return }
 
-        let compatibilityWindow: AXUIElement?
-        if textRoles.contains(role) {
-            compatibilityWindow = nil
-        } else if allowCompatibilityTyping, opaqueRoles.contains(role), !IsSecureEventInputEnabled(),
-                  let window = elementAttribute(kAXFocusedWindowAttribute, of: app) {
-            compatibilityWindow = window
-        } else {
-            NSSound.beep()
-            return
+        let compatibility = !textRoles.contains(role)
+        let window = elementAttribute(kAXFocusedWindowAttribute, of: app)
+        if compatibility {
+            guard allowCompatibilityTyping, opaqueRoles.contains(role), window != nil, !IsSecureEventInputEnabled()
+            else { NSSound.beep(); return }
         }
-        let keepTypingInBackground = keepTypingInBackground && compatibilityWindow == nil
-        let initialRange = keepTypingInBackground ? selectedRange(in: field) : nil
-        let initialLength = keepTypingInBackground ? textLength(in: field) : nil
-        // An empty editor has only one insertion point, even if its range is not exposed yet.
+        var input = compatibility ? hardwareInputCounts() : []
+        let initialRange = compatibility ? nil : selectedRange(in: field)
+        let initialLength = compatibility ? nil : textLength(in: field)
         let startedEmpty = initialLength == 0 &&
             (initialRange == nil || (initialRange?.length == 0 && initialRange?.location == 0))
         var appendConfirmed = startedEmpty || (initialRange?.length == 0 && initialRange?.location == initialLength)
         var initialTextToVerify: String?
-        if keepTypingInBackground && !appendConfirmed &&
+        if !compatibility && !appendConfirmed &&
             (initialRange == nil || (initialRange?.location == 0 && initialRange?.length == 0)) {
             initialTextToVerify = attribute(kAXValueAttribute, of: field) as? String
         }
-        canContinueAcrossApps = appendConfirmed || initialTextToVerify != nil
-        hasSwitchedApps = false
+
+        let content = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        targetPID = pid
+        leftTargetApp = false
+        resumeRequested = false
+        progress = Progress(appName: target.localizedName ?? "Original app", total: content.count)
         task = Task {
             defer {
                 task = nil
-                isWaitingForTarget = false
+                targetPID = nil
+                progress = nil
                 onChange?()
             }
 
             let clock = ContinuousClock()
-            let deadline = clock.now + .seconds(3)
-            while modifiersHeld {
-                guard clock.now < deadline else { return }
-                try? await Task.sleep(for: .milliseconds(25))
-                guard !Task.isCancelled else { return }
+            var pendingFirstAppend: (initial: String, inserted: String, deadline: ContinuousClock.Instant)?
+            var needsRecovery = false
+            var manualPause: Phase?
+
+            @MainActor func didResume() {
+                manualPause = nil
+                needsRecovery = false
+                leftTargetApp = false
+                resumeRequested = false
+                setPhase(.typing)
             }
 
-            let content = text.replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-            var pendingFirstAppend: (initial: String, inserted: String, deadline: ContinuousClock.Instant)?
-            var hasPostedKey = false
             @MainActor func canType() async -> Bool {
-                var requestedCaretMove = false
                 while !Task.isCancelled, !target.isTerminated, CGPreflightPostEventAccess() {
-                    let hasOriginalFocus = focusedElement(in: app).map { CFEqual($0, field) } ?? false
-                    if let window = compatibilityWindow {
-                        // The app exposed a container. Stop on new user input even if its AX focus stays the same.
-                        return hasOriginalFocus &&
-                            elementAttribute(kAXFocusedWindowAttribute, of: app).map { CFEqual($0, window) } == true &&
-                            initialInput == hardwareInputCounts() && !modifiersHeld && !IsSecureEventInputEnabled() &&
-                            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-                    }
+                    let currentField = focusedElement(in: app)
+                    let hasOriginalFocus = currentField.map { CFEqual($0, field) } ?? false
                     let isFrontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+                    if !isFrontmost || !hasOriginalFocus || leftTargetApp { needsRecovery = true }
+                    let checkWindow = isFrontmost && (compatibility || needsRecovery || manualPause != nil)
+                    let sameWindow = !checkWindow || (window.map { original in
+                        elementAttribute(kAXFocusedWindowAttribute, of: app).map { CFEqual($0, original) } == true
+                    } ?? true)
 
-                    if hasOriginalFocus, let pending = pendingFirstAppend {
-                        if let current = attribute(kAXValueAttribute, of: field) as? String,
-                           !current.utf16.elementsEqual(pending.initial.utf16) {
-                            let appended = pending.initial + pending.inserted
-                            // Some empty rich-text editors expose a one-unit placeholder
-                            // that the first real character replaces.
-                            appendConfirmed = current.utf16.elementsEqual(appended.utf16) ||
-                                (pending.initial.utf16.count == 1 && current.utf16.elementsEqual(pending.inserted.utf16))
-                            canContinueAcrossApps = appendConfirmed
-                            pendingFirstAppend = nil
-                        } else if clock.now < pending.deadline {
-                            try? await Task.sleep(for: .milliseconds(25))
-                            continue
-                        } else if isFrontmost && !hasSwitchedApps {
-                            // Keep foreground typing usable if the editor can't confirm the first key.
-                            canContinueAcrossApps = false
-                            pendingFirstAppend = nil
+                    if compatibility {
+                        // A container can stay focused even when its actual editor changes.
+                        let ready = isFrontmost && sameWindow && hasOriginalFocus && !IsSecureEventInputEnabled()
+                        let inputNow = hardwareInputCounts()
+                        if needsRecovery || !ready || input != inputNow {
+                            manualPause = .paused
                         }
-                    }
-
-                    if !isFrontmost {
-                        guard canContinueAcrossApps else { return false }
-                        hasSwitchedApps = true
-                        if appendConfirmed && hasOriginalFocus &&
-                            caretAtEnd(in: field, requireText: true) {
-                            setWaitingForTarget(false)
+                        if ready, !modifiersHeld, manualPause == nil || resumeRequested,
+                           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                            input = inputNow
+                            didResume()
                             return true
                         }
-                        // Some apps stop exposing their focused field when they become inactive.
-                        setWaitingForTarget(true)
-                        requestedCaretMove = false
-                    } else if hasOriginalFocus {
-                        if modifiersHeld {
-                            // Give app-switch shortcuts time to finish before sending more keys.
-                            guard canContinueAcrossApps else { return false }
-                            try? await Task.sleep(for: .milliseconds(25))
-                            continue
-                        }
-                        if canContinueAcrossApps && !appendConfirmed && hasSwitchedApps &&
-                            pendingFirstAppend == nil && caretAtEnd(in: field) {
-                            appendConfirmed = true
-                        }
-                        // If the user switched away before the first key, the original
-                        // empty field can still be resumed without a reported caret.
-                        let canStartInEmptyField = startedEmpty && !hasPostedKey &&
-                            textLength(in: field) == 0 && selectedRange(in: field) == nil
-                        if !hasSwitchedApps || (appendConfirmed && (caretAtEnd(in: field) || canStartInEmptyField)) {
-                            setWaitingForTarget(false)
-                            return true
-                        }
-                        guard canContinueAcrossApps else { return false }
-                        if appendConfirmed, !requestedCaretMove, let end = textLength(in: field) {
-                            let selection = selectedRange(in: field)
-                            if selection == nil || (selection?.length == 0 && (selection?.location ?? 0) <= end) {
-                                if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-                                    _ = moveCaret(to: end, in: field)
-                                    requestedCaretMove = true
-                                }
+                    } else {
+                        if hasOriginalFocus, let pending = pendingFirstAppend {
+                            if let current = attribute(kAXValueAttribute, of: field) as? String,
+                               !current.utf16.elementsEqual(pending.initial.utf16) {
+                                let appended = pending.initial + pending.inserted
+                                // Some rich-text editors expose a one-unit placeholder until the first key.
+                                appendConfirmed = current.utf16.elementsEqual(appended.utf16) ||
+                                    (pending.initial.utf16.count == 1 && current.utf16.elementsEqual(pending.inserted.utf16))
+                                pendingFirstAppend = nil
+                            } else if isFrontmost && clock.now >= pending.deadline {
+                                pendingFirstAppend = nil
+                            } else if isFrontmost && !needsRecovery {
+                                try? await Task.sleep(for: .milliseconds(25))
+                                continue
                             }
                         }
-                    } else if !isWaitingForTarget && !hasSwitchedApps {
-                        return false
+
+                        if hasOriginalFocus, !modifiersHeld, manualPause == nil || resumeRequested {
+                            if isFrontmost && sameWindow {
+                                if !needsRecovery && manualPause == nil {
+                                    setPhase(.typing)
+                                    return true
+                                }
+                                let selection = selectedRange(in: field)
+                                let length = textLength(in: field)
+                                let atEnd = selection?.length == 0 && selection?.location == length
+                                let canStartInEmptyField = startedEmpty && progress?.typed == 0 &&
+                                    length == 0 && selection == nil
+                                let explicitResume = resumeRequested && (selection?.length ?? 0) == 0
+                                if (appendConfirmed && (atEnd || canStartInEmptyField)) || explicitResume,
+                                   NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                                    if explicitResume { appendConfirmed = atEnd || canStartInEmptyField }
+                                    didResume()
+                                    return true
+                                }
+                            } else if !isFrontmost && keepTypingInBackground && appendConfirmed &&
+                                        manualPause == nil && caretAtEnd(in: field, requireText: true) {
+                                setPhase(.typing)
+                                return true
+                            }
+                        }
                     }
 
-                    setWaitingForTarget(true)
-                    try? await Task.sleep(for: .milliseconds(150))
+                    if !isFrontmost || !sameWindow || !hasOriginalFocus || !modifiersHeld {
+                        resumeRequested = false
+                    }
+                    if let manualPause {
+                        setPhase(manualPause)
+                    } else if needsRecovery {
+                        setPhase(appendConfirmed || pendingFirstAppend != nil ? .waitingForTarget : .paused)
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
                 }
                 return false
             }
@@ -211,36 +222,41 @@ final class TypingSession {
             for character in content {
                 guard await canType() else { return }
 
-                if compatibilityWindow == nil, typoRate > 0,
+                if !compatibility, typoRate > 0,
                    let typo = TypoRate.replacement(for: character, rate: typoRate, roll: Int.random(in: 0..<100)),
                    let caret = insertionPoint(in: field),
                    let text = attribute(kAXValueAttribute, of: field) as? String,
                    let pending = PendingTypo(text: text, caret: caret, letter: typo) {
                     guard await canType(), post(String(typo), from: source, to: pid) else { return }
-                    hasPostedKey = true
                     let pause = TypingPace.delay(after: typo, rate: rate, variation: variation)
                     try? await Task.sleep(for: pause + .milliseconds(100))
 
-                    // Only delete when the field contains the exact insertion we just made.
-                    guard await canType(),
-                          pending.canCorrect(text: attribute(kAXValueAttribute, of: field) as? String,
-                                             caret: insertionPoint(in: field)),
-                          post("\u{7F}", key: CGKeyCode(kVK_Delete), from: source, to: pid)
-                    else { return }
+                    guard await canType() else { return }
+                    if pending.canCorrect(text: attribute(kAXValueAttribute, of: field) as? String,
+                                          caret: insertionPoint(in: field)) {
+                        guard post("\u{7F}", key: CGKeyCode(kVK_Delete), from: source, to: pid) else { return }
+                    } else {
+                        // Only delete an exact, verified typo. Let the user restore the draft before resuming.
+                        manualPause = .checkLastCharacter
+                        resumeRequested = false
+                        guard await canType() else { return }
+                    }
                 }
 
-                if character.isNewline, role == kAXTextAreaRole || compatibilityWindow != nil {
+                if character.isNewline, role == kAXTextAreaRole || compatibility {
                     // Rich-text fields can ignore a Unicode newline, but handle Shift-Return.
                     guard post("\r", key: CGKeyCode(kVK_Return), flags: .maskShift, from: source, to: pid)
                     else { return }
                 } else {
                     guard post(String(character), from: source, to: pid) else { return }
                 }
-                hasPostedKey = true
                 if let initial = initialTextToVerify {
                     pendingFirstAppend = (initial, String(character), clock.now + .milliseconds(250))
                     initialTextToVerify = nil
                 }
+                progress?.typed += 1
+                onChange?()
+                if progress?.typed == progress?.total { return }
                 try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate, variation: variation))
             }
         }
@@ -249,19 +265,24 @@ final class TypingSession {
 
     func stop() { task?.cancel() }
 
-    private func setWaitingForTarget(_ waiting: Bool) {
-        guard isWaitingForTarget != waiting else { return }
-        isWaitingForTarget = waiting
-        onChange?()
+    func requestResume() -> Bool {
+        guard let progress, progress.phase != .typing,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else { return false }
+        resumeRequested = true
+        return true
     }
 
-    func appDidSwitch() {
-        guard isRunning else { return }
-        if canContinueAcrossApps {
-            hasSwitchedApps = true
-        } else {
-            stop()
+    func appDidSwitch(to pid: pid_t) {
+        if let targetPID, targetPID != pid {
+            leftTargetApp = true
+            resumeRequested = false
         }
+    }
+
+    private func setPhase(_ phase: Phase) {
+        guard progress?.phase != phase else { return }
+        progress?.phase = phase
+        onChange?()
     }
 
     private var modifiersHeld: Bool {
@@ -322,12 +343,6 @@ final class TypingSession {
     private func caretAtEnd(in field: AXUIElement, requireText: Bool = false) -> Bool {
         guard let end = textLength(in: field), !requireText || end > 0 else { return false }
         return insertionPoint(in: field) == end
-    }
-
-    private func moveCaret(to end: Int, in field: AXUIElement) -> Bool {
-        var range = CFRange(location: end, length: 0)
-        guard let value = AXValueCreate(.cfRange, &range) else { return false }
-        return AXUIElementSetAttributeValue(field, kAXSelectedTextRangeAttribute as CFString, value) == .success
     }
 
     private func post(_ text: String, key: CGKeyCode = 0, flags: CGEventFlags = [],
