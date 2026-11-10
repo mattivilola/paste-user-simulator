@@ -8,7 +8,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let typing = TypingSession()
     private lazy var feedback = TypingFeedbackPanel(onResume: { [weak self] in self?.resumeTyping() },
-                                                   onStop: { [weak self] in self?.stopTyping(nil) })
+                                                   onStop: { [weak self] in self?.stopTyping(nil) },
+                                                   onSpeedChange: { [weak self] in self?.adjustSpeed(by: $0) },
+                                                   onSpeedButtonClick: { [weak self] in self?.typing.allowSpeedButtonClick() })
     private lazy var hotKey = HotKey { [weak self] in self?.toggleTyping() }
     private var shortcut = Shortcut.standard
     private var shortcutAvailable = false
@@ -195,7 +197,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let description: String
         if let progress {
             let state = paused ? "Paused" : "Typing"
-            description = "\(state) · \(progress.appName) · \(progress.percent)%"
+            description = "\(state) · \(progress.appName) · \(progress.percent)% · \(progress.rate) chars/min"
         } else if !shortcutAvailable {
             description = "Shortcut unavailable · Open Settings"
         } else if hasText {
@@ -233,6 +235,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !typing.requestResume() { NSSound.beep() }
     }
 
+    private func adjustSpeed(by delta: Int) {
+        let range = TypingPace.range
+        setSpeed(min(range.upperBound, max(range.lowerBound, speed + delta)))
+    }
+
+    private func setSpeed(_ rate: Int) {
+        UserDefaults.standard.set(rate, forKey: "charactersPerMinute")
+        typing.setRate(rate)
+        settings?.setSpeed(rate)
+    }
+
     @objc private func stopTyping(_ sender: Any?) { typing.stop() }
 
     @objc private func frontmostAppChanged(_ notification: Notification) {
@@ -258,8 +271,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if settings == nil {
             settings = SettingsWindow(speed: speed, speedVariation: speedVariation, shortcut: shortcut, typoRate: typoRate,
                                       keepTypingInBackground: keepTypingInBackground,
-                                      allowCompatibilityTyping: allowCompatibilityTyping, saveSpeed: {
-                UserDefaults.standard.set($0, forKey: "charactersPerMinute")
+                                      allowCompatibilityTyping: allowCompatibilityTyping, saveSpeed: { [weak self] in
+                self?.setSpeed($0)
             }, saveSpeedVariation: {
                 UserDefaults.standard.set($0.rawValue, forKey: "typingVariationPercent")
             }, saveTypoRate: {
@@ -298,21 +311,28 @@ private final class TypingFeedbackPanel: NSPanel {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
-    private let progressBar = NSProgressIndicator()
+    private let progressBar = GradientProgressBar()
     private let countLabel = NSTextField(labelWithString: "")
     private let resumeButton = PanelButton()
     private let stopButton = PanelButton()
+    private let speedLabel = NSTextField(labelWithString: "")
+    private let slowerButton = PanelButton()
+    private let fasterButton = PanelButton()
+    private let speedRow = NSStackView()
     private let onResume: () -> Void
     private let onStop: () -> Void
+    private let onSpeedChange: (Int) -> Void
     private var dismissal: Task<Void, Never>?
     private var session: TypingSession.Progress?
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    init(onResume: @escaping () -> Void, onStop: @escaping () -> Void) {
+    init(onResume: @escaping () -> Void, onStop: @escaping () -> Void,
+         onSpeedChange: @escaping (Int) -> Void, onSpeedButtonClick: @escaping () -> Void) {
         self.onResume = onResume
         self.onStop = onStop
+        self.onSpeedChange = onSpeedChange
         super.init(contentRect: NSRect(x: 0, y: 0, width: 196, height: 44),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         level = .floating
@@ -343,10 +363,10 @@ private final class TypingFeedbackPanel: NSPanel {
         row.spacing = 8
         hintLabel.font = .systemFont(ofSize: 12)
         hintLabel.textColor = .secondaryLabelColor
-        progressBar.style = .bar
-        progressBar.isIndeterminate = false
-        progressBar.controlSize = .small
         progressBar.widthAnchor.constraint(equalToConstant: 292).isActive = true
+        progressBar.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        progressBar.setAccessibilityElement(true)
+        progressBar.setAccessibilityRole(.progressIndicator)
         progressBar.setAccessibilityLabel("Typing progress")
         countLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         countLabel.textColor = .secondaryLabelColor
@@ -354,7 +374,17 @@ private final class TypingFeedbackPanel: NSPanel {
         configure(stopButton, symbol: "stop.fill", title: "Stop typing", action: #selector(stop))
         row.addArrangedSubview(resumeButton)
         row.addArrangedSubview(stopButton)
-        let stack = NSStackView(views: [row, progressBar, countLabel, hintLabel])
+        configure(slowerButton, symbol: "minus", title: "Decrease typing speed", action: #selector(slower))
+        configure(fasterButton, symbol: "plus", title: "Increase typing speed", action: #selector(faster))
+        slowerButton.onMouseDown = onSpeedButtonClick
+        fasterButton.onMouseDown = onSpeedButtonClick
+        speedLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        speedLabel.alignment = .center
+        speedLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        speedRow.spacing = 4
+        speedRow.alignment = .centerY
+        for view in [slowerButton, speedLabel, fasterButton] as [NSView] { speedRow.addArrangedSubview(view) }
+        let stack = NSStackView(views: [row, progressBar, countLabel, speedRow, hintLabel])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 4
@@ -368,18 +398,24 @@ private final class TypingFeedbackPanel: NSPanel {
         contentView = surface
     }
 
-    func show(_ message: String, symbol: String, hint: String? = nil) {
+    func show(_ message: String, symbol: String, hint: String? = nil, completed: TypingSession.Progress? = nil) {
         dismissal?.cancel()
         ignoresMouseEvents = true
-        progressBar.isHidden = true
-        countLabel.isHidden = true
+        progressBar.isHidden = completed == nil
+        countLabel.isHidden = completed == nil
+        speedRow.isHidden = true
         resumeButton.isHidden = true
         stopButton.isHidden = true
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         label.stringValue = message
         hintLabel.stringValue = hint ?? ""
         hintLabel.isHidden = hint == nil
-        setContentSize(hint == nil ? NSSize(width: 196, height: 44) : NSSize(width: 240, height: 62))
+        if let completed {
+            updateCount(completed)
+            setContentSize(NSSize(width: 324, height: 76))
+        } else {
+            setContentSize(hint == nil ? NSSize(width: 196, height: 44) : NSSize(width: 240, height: 62))
+        }
         present()
         dismissal = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(hint == nil ? 1250 : 2200))
@@ -408,13 +444,15 @@ private final class TypingFeedbackPanel: NSPanel {
             hintLabel.isHidden = false
             progressBar.isHidden = false
             countLabel.isHidden = false
+            speedRow.isHidden = false
             resumeButton.isHidden = typing
             stopButton.isHidden = false
-            if isNew { setContentSize(NSSize(width: 324, height: 106)) }
+            if isNew { setContentSize(NSSize(width: 324, height: 132)) }
         }
-        progressBar.maxValue = Double(progress.total)
-        progressBar.doubleValue = Double(progress.typed)
-        countLabel.stringValue = "\(progress.typed.formatted()) / \(progress.total.formatted()) characters · \(progress.percent)%"
+        updateCount(progress)
+        speedLabel.stringValue = "\(progress.rate.formatted()) chars/min"
+        slowerButton.isEnabled = progress.rate > TypingPace.range.lowerBound
+        fasterButton.isEnabled = progress.rate < TypingPace.range.upperBound
         if isNew { present() }
     }
 
@@ -422,10 +460,15 @@ private final class TypingFeedbackPanel: NSPanel {
         guard let session else { return }
         self.session = nil
         if session.typed == session.total {
-            show("Typing complete", symbol: "checkmark.circle.fill")
+            show("Typing complete", symbol: "checkmark.circle.fill", completed: session)
         } else {
             show("Typing stopped", symbol: "stop.circle.fill")
         }
+    }
+
+    private func updateCount(_ progress: TypingSession.Progress) {
+        progressBar.fraction = Double(progress.typed) / Double(progress.total)
+        countLabel.stringValue = "\(progress.typed.formatted()) / \(progress.total.formatted()) characters · \(progress.percent)%"
     }
 
     private func configure(_ button: NSButton, symbol: String, title: String, action: Selector) {
@@ -443,6 +486,8 @@ private final class TypingFeedbackPanel: NSPanel {
 
     @objc private func resume() { onResume() }
     @objc private func stop() { onStop() }
+    @objc private func slower() { onSpeedChange(-TypingPace.adjustment) }
+    @objc private func faster() { onSpeedChange(TypingPace.adjustment) }
 
     private func present() {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
@@ -454,5 +499,33 @@ private final class TypingFeedbackPanel: NSPanel {
 }
 
 private final class PanelButton: NSButton {
+    var onMouseDown: (() -> Void)?
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?()
+        super.mouseDown(with: event)
+    }
+}
+
+private final class GradientProgressBar: NSView {
+    private let gradient = NSGradient(starting: NSColor(srgbRed: 0.26, green: 0.60, blue: 1, alpha: 1),
+                                      ending: NSColor(srgbRed: 0.23, green: 0.87, blue: 0.69, alpha: 1))
+
+    var fraction = 0.0 {
+        didSet {
+            needsDisplay = true
+            setAccessibilityValue(fraction)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        NSColor.white.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        guard fraction > 0 else { return }
+        let fill = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width * fraction, height: bounds.height)
+        gradient?.draw(in: NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius), angle: 0)
+    }
 }

@@ -12,6 +12,7 @@ enum TypingPace {
 
     static let range = 60...1200
     static let standard = 300
+    static let adjustment = 30
 
     static func delay(after character: Character, rate: Int, variation: Variation) -> Duration {
         let seconds = 60.0 / Double(rate)
@@ -39,21 +40,38 @@ enum TypoRate {
     }
 }
 
-struct PendingTypo {
-    private let expectedText: String
-    private let expectedCaret: Int
+struct TextAtCaret {
+    let before: String
+    let after: String
 
-    init?(text: String, caret: Int, letter: Character) {
-        let text = text as NSString
-        guard (0...text.length).contains(caret) else { return nil }
-        let insertion = String(letter)
-        expectedText = text.replacingCharacters(in: NSRange(location: caret, length: 0), with: insertion)
-        expectedCaret = caret + insertion.utf16.count
+    init(before: String, after: String) {
+        self.before = before
+        self.after = after
     }
 
-    func canCorrect(text: String?, caret: Int?) -> Bool {
-        guard let text, caret == expectedCaret else { return false }
-        return text.utf16.elementsEqual(expectedText.utf16)
+    init?(text: String, caret: Int) {
+        let text = text as NSString
+        guard (0...text.length).contains(caret) else { return nil }
+        self.init(before: text.substring(to: caret), after: text.substring(from: caret))
+    }
+}
+
+struct PendingTypo {
+    let original: TextAtCaret
+    let letter: Character
+
+    func canCorrect(_ current: TextAtCaret) -> Bool {
+        normalized(current.before) == normalized(original.before + String(letter)) &&
+            normalized(current.after) == normalized(original.after)
+    }
+
+    private func normalized(_ text: String) -> String {
+        // Rich editors may turn a trailing non-breaking space into a regular space as a word grows.
+        text.replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
     }
 }
 
@@ -66,6 +84,7 @@ final class TypingSession {
     struct Progress {
         let appName: String
         let total: Int
+        var rate: Int
         var typed = 0
         var phase = Phase.typing
 
@@ -76,6 +95,7 @@ final class TypingSession {
     private var targetPID: pid_t?
     private var leftTargetApp = false
     private var resumeRequested = false
+    private var compatibilityInput: [UInt32]?
     var onChange: (() -> Void)?
     private(set) var progress: Progress?
 
@@ -100,12 +120,15 @@ final class TypingSession {
             guard allowCompatibilityTyping, opaqueRoles.contains(role), window != nil, !IsSecureEventInputEnabled()
             else { NSSound.beep(); return }
         }
-        var input = compatibility ? hardwareInputCounts() : []
+        compatibilityInput = compatibility ? hardwareInputCounts() : nil
         let initialRange = compatibility ? nil : selectedRange(in: field)
         let initialLength = compatibility ? nil : textLength(in: field)
         let startedEmpty = initialLength == 0 &&
             (initialRange == nil || (initialRange?.length == 0 && initialRange?.location == 0))
         var appendConfirmed = startedEmpty || (initialRange?.length == 0 && initialRange?.location == initialLength)
+        if !appendConfirmed && role == kAXTextAreaRole {
+            appendConfirmed = textAtMarker(in: field)?.after.isEmpty == true
+        }
         var initialTextToVerify: String?
         if !compatibility && !appendConfirmed &&
             (initialRange == nil || (initialRange?.location == 0 && initialRange?.length == 0)) {
@@ -117,11 +140,12 @@ final class TypingSession {
         targetPID = pid
         leftTargetApp = false
         resumeRequested = false
-        progress = Progress(appName: target.localizedName ?? "Original app", total: content.count)
+        progress = Progress(appName: target.localizedName ?? "Original app", total: content.count, rate: rate)
         task = Task {
             defer {
                 task = nil
                 targetPID = nil
+                compatibilityInput = nil
                 progress = nil
                 onChange?()
             }
@@ -154,12 +178,12 @@ final class TypingSession {
                         // A container can stay focused even when its actual editor changes.
                         let ready = isFrontmost && sameWindow && hasOriginalFocus && !IsSecureEventInputEnabled()
                         let inputNow = hardwareInputCounts()
-                        if needsRecovery || !ready || input != inputNow {
+                        if needsRecovery || !ready || compatibilityInput != inputNow {
                             manualPause = .paused
                         }
                         if ready, !modifiersHeld, manualPause == nil || resumeRequested,
                            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-                            input = inputNow
+                            compatibilityInput = inputNow
                             didResume()
                             return true
                         }
@@ -188,7 +212,8 @@ final class TypingSession {
                                 }
                                 let selection = selectedRange(in: field)
                                 let length = textLength(in: field)
-                                let atEnd = selection?.length == 0 && selection?.location == length
+                                let atEnd = (selection?.length == 0 && selection?.location == length) ||
+                                    textAtMarker(in: field)?.after.isEmpty == true
                                 let canStartInEmptyField = startedEmpty && progress?.typed == 0 &&
                                     length == 0 && selection == nil
                                 let explicitResume = resumeRequested && (selection?.length ?? 0) == 0
@@ -219,28 +244,49 @@ final class TypingSession {
                 return false
             }
 
+            @MainActor func simulateTypo(_ letter: Character, after previous: Character?) async -> Bool {
+                // Skip the simulation when the editor is still reporting text from before the last key.
+                func pending(_ snapshot: TextAtCaret?) -> PendingTypo? {
+                    guard let snapshot else { return nil }
+                    if let previous, previous.isASCII, previous.isLetter, snapshot.before.last != previous { return nil }
+                    return PendingTypo(original: snapshot, letter: letter)
+                }
+                let markerTypo = role == kAXTextAreaRole ? pending(textAtMarker(in: field)) : nil
+                let rangeTypo = pending(textAtSelection(in: field))
+                guard markerTypo != nil || rangeTypo != nil else { return true }
+                guard !modifiersHeld, focusedElement(in: app).map({ CFEqual($0, field) }) == true else {
+                    return await canType()
+                }
+                guard post(String(letter), from: source, to: pid) else { return false }
+                let pause = TypingPace.delay(after: letter, rate: progress?.rate ?? rate, variation: variation)
+                try? await Task.sleep(for: pause + .milliseconds(100))
+
+                for _ in 0..<16 {
+                    guard await canType() else { return false }
+                    let verifiedAtMarker = markerTypo.map { pending in
+                        textAtMarker(in: field).map(pending.canCorrect) == true
+                    } ?? false
+                    let verified = verifiedAtMarker || (rangeTypo.map { pending in
+                        textAtSelection(in: field).map(pending.canCorrect) == true
+                    } ?? false)
+                    if verified, !modifiersHeld, focusedElement(in: app).map({ CFEqual($0, field) }) == true {
+                        return post("\u{7F}", key: CGKeyCode(kVK_Delete), from: source, to: pid)
+                    }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                // An edit or cursor move we cannot verify needs manual correction.
+                manualPause = .checkLastCharacter
+                resumeRequested = false
+                return await canType()
+            }
+
+            var previous: Character?
             for character in content {
                 guard await canType() else { return }
 
-                if !compatibility, typoRate > 0,
-                   let typo = TypoRate.replacement(for: character, rate: typoRate, roll: Int.random(in: 0..<100)),
-                   let caret = insertionPoint(in: field),
-                   let text = attribute(kAXValueAttribute, of: field) as? String,
-                   let pending = PendingTypo(text: text, caret: caret, letter: typo) {
-                    guard await canType(), post(String(typo), from: source, to: pid) else { return }
-                    let pause = TypingPace.delay(after: typo, rate: rate, variation: variation)
-                    try? await Task.sleep(for: pause + .milliseconds(100))
-
-                    guard await canType() else { return }
-                    if pending.canCorrect(text: attribute(kAXValueAttribute, of: field) as? String,
-                                          caret: insertionPoint(in: field)) {
-                        guard post("\u{7F}", key: CGKeyCode(kVK_Delete), from: source, to: pid) else { return }
-                    } else {
-                        // Only delete an exact, verified typo. Let the user restore the draft before resuming.
-                        manualPause = .checkLastCharacter
-                        resumeRequested = false
-                        guard await canType() else { return }
-                    }
+                if !compatibility, initialTextToVerify == nil, typoRate > 0,
+                   let typo = TypoRate.replacement(for: character, rate: typoRate, roll: Int.random(in: 0..<100)) {
+                    guard await simulateTypo(typo, after: previous) else { return }
                 }
 
                 if character.isNewline, role == kAXTextAreaRole || compatibility {
@@ -254,16 +300,30 @@ final class TypingSession {
                     pendingFirstAppend = (initial, String(character), clock.now + .milliseconds(250))
                     initialTextToVerify = nil
                 }
+                previous = character
                 progress?.typed += 1
                 onChange?()
                 if progress?.typed == progress?.total { return }
-                try? await Task.sleep(for: TypingPace.delay(after: character, rate: rate, variation: variation))
+                try? await Task.sleep(for: TypingPace.delay(after: character, rate: progress?.rate ?? rate,
+                                                           variation: variation))
             }
         }
         onChange?()
     }
 
     func stop() { task?.cancel() }
+
+    func setRate(_ rate: Int) {
+        guard progress != nil, progress?.rate != rate else { return }
+        progress?.rate = rate
+        onChange?()
+    }
+
+    func allowSpeedButtonClick() {
+        guard progress?.phase == .typing, var expected = compatibilityInput else { return }
+        expected[1] &+= 1 // Left mouse down in our own panel.
+        if hardwareInputCounts() == expected { compatibilityInput = expected }
+    }
 
     func requestResume() -> Bool {
         guard let progress, progress.phase != .typing,
@@ -318,6 +378,37 @@ final class TypingSession {
         return range.location
     }
 
+    private func textAtSelection(in field: AXUIElement) -> TextAtCaret? {
+        guard let caret = insertionPoint(in: field),
+              let text = attribute(kAXValueAttribute, of: field) as? String else { return nil }
+        return TextAtCaret(text: text, caret: caret)
+    }
+
+    private func textAtMarker(in field: AXUIElement) -> TextAtCaret? {
+        // Use the same text representation for both the content and the insertion point.
+        guard (selectedRange(in: field)?.length ?? 0) == 0,
+              let selected = attribute("AXSelectedTextMarkerRange", of: field),
+              CFGetTypeID(selected) == AXTextMarkerRangeGetTypeID(),
+              parameterizedAttribute("AXStringForTextMarkerRange", of: field, with: selected) as? String == "",
+              let whole = parameterizedAttribute("AXTextMarkerRangeForUIElement", of: field, with: field),
+              CFGetTypeID(whole) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let fieldRange = whole as! AXTextMarkerRange
+        let caret = AXTextMarkerRangeCopyStartMarker(selected as! AXTextMarkerRange)
+        let before = AXTextMarkerRangeCreate(nil, AXTextMarkerRangeCopyStartMarker(fieldRange), caret)
+        let after = AXTextMarkerRangeCreate(nil, caret, AXTextMarkerRangeCopyEndMarker(fieldRange))
+        guard let prefix = parameterizedAttribute("AXStringForTextMarkerRange", of: field, with: before) as? String,
+              let suffix = parameterizedAttribute("AXStringForTextMarkerRange", of: field, with: after) as? String
+        else { return nil }
+        return TextAtCaret(before: prefix, after: suffix)
+    }
+
+    private func parameterizedAttribute(_ name: String, of element: AXUIElement, with parameter: CFTypeRef) -> CFTypeRef? {
+        var result: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, name as CFString, parameter, &result) == .success
+        else { return nil }
+        return result
+    }
+
     private func selectedRange(in field: AXUIElement) -> CFRange? {
         guard let value = attribute(kAXSelectedTextRangeAttribute, of: field),
               CFGetTypeID(value) == AXValueGetTypeID()
@@ -341,8 +432,11 @@ final class TypingSession {
     }
 
     private func caretAtEnd(in field: AXUIElement, requireText: Bool = false) -> Bool {
-        guard let end = textLength(in: field), !requireText || end > 0 else { return false }
-        return insertionPoint(in: field) == end
+        if let end = textLength(in: field), (!requireText || end > 0), insertionPoint(in: field) == end {
+            return true
+        }
+        guard let text = textAtMarker(in: field) else { return false }
+        return text.after.isEmpty && (!requireText || !text.before.isEmpty)
     }
 
     private func post(_ text: String, key: CGKeyCode = 0, flags: CGEventFlags = [],

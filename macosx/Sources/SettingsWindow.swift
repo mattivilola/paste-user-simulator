@@ -4,6 +4,7 @@ import Carbon
 @MainActor
 final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let speedLabel = NSTextField(labelWithString: "")
+    private let speedSlider = NSSlider()
     private let shortcutButton = ShortcutButton()
     private let message = NSTextField(labelWithString: "")
     private let saveSpeed: (Int) -> Void
@@ -29,14 +30,14 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         window.delegate = self
         window.center()
 
-        let range = TypingPace.range
-        let slider = NSSlider(value: Double(speed), minValue: Double(range.lowerBound),
-                              maxValue: Double(range.upperBound), target: self,
-                              action: #selector(speedChanged(_:)))
-        slider.widthAnchor.constraint(equalToConstant: 316).isActive = true
-        slider.setAccessibilityLabel("Typing speed in characters per minute")
+        speedSlider.minValue = Double(TypingPace.range.lowerBound)
+        speedSlider.maxValue = Double(TypingPace.range.upperBound)
+        speedSlider.target = self
+        speedSlider.action = #selector(speedChanged(_:))
+        speedSlider.widthAnchor.constraint(equalToConstant: 316).isActive = true
+        speedSlider.setAccessibilityLabel("Typing speed in characters per minute")
         speedLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        updateSpeedLabel(speed)
+        setSpeed(speed)
 
         let variation = NSPopUpButton()
         for option in TypingPace.Variation.allCases {
@@ -87,7 +88,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         compatibility.state = allowCompatibilityTyping ? .on : .off
         compatibility.toolTip = "Type in the active window when an editor does not expose its text field."
 
-        let stack = NSStackView(views: [speedLabel, slider, variationRow, typoRow, background, compatibility,
+        let stack = NSStackView(views: [speedLabel, speedSlider, variationRow, typoRow, background, compatibility,
                                        shortcutRow, message])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -109,7 +110,6 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func speedChanged(_ slider: NSSlider) {
-        updateSpeedLabel(slider.integerValue)
         saveSpeed(slider.integerValue)
     }
 
@@ -131,7 +131,8 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         saveCompatibilityTyping(checkbox.state == .on)
     }
 
-    private func updateSpeedLabel(_ speed: Int) {
+    func setSpeed(_ speed: Int) {
+        speedSlider.integerValue = speed
         speedLabel.stringValue = "Typing speed  ·  \(speed) characters/min"
     }
 }

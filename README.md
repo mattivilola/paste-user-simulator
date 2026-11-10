@@ -14,11 +14,11 @@ Download the ZIP from [GitHub Releases](https://github.com/mattivilola/paste-use
 2. Focus a text field and press **⌘⌥V**. On first use, allow Paste User Simulator in **System Settings → Privacy & Security → Accessibility**. Then return to your text field and press the shortcut again.
 3. The floating status box shows the destination app, character count, and progress. Press the shortcut again while typing to stop, or use the stop button. To resume a paused session, refocus the original field and press the shortcut or click the play button.
 
-Open **Settings** from the menu bar to change the shortcut or speed. The default is 300 characters per minute.
+Open **Settings** from the menu bar to change the shortcut or speed. The default is 300 characters per minute. Use **−** and **+** in the floating status box to change the target speed by 30 characters per minute during a session. This also saves the new speed in Settings.
 
 **Speed variation** changes the time between keystrokes. Choose Off, 10% (Subtle), 20% (Moderate, the default), or 35% (Strong). The app still pauses after punctuation when variation is Off.
 
-**Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If typing is interrupted mid-correction, check the last letter.
+**Typos per 100 letters** is off by default. Set it to 1–10 to occasionally type a nearby key, pause, then backspace and type the intended letter. The rate is an average for A–Z letters in fields that expose their text and caret position. If the text or caret changes during correction, the app may ask you to check the last letter before resuming.
 
 **Keep typing after switching apps** applies when typing starts with the caret at the end of the field. The destination must keep that field focused, expose the caret, and accept background keystrokes. Otherwise, the session keeps its place and waits. Returning to the original field with the caret at its end resumes a session that started there. You can also refocus the original field, place the caret where you want to continue, and resume manually.
 
