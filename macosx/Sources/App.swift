@@ -17,6 +17,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasText = false
     private var updater: SPUStandardUpdaterController?
     private let summaryItem = NSMenuItem()
+    private let previewItem = NSMenuItem()
+    private let previewLabel = NSTextField(wrappingLabelWithString: "")
     private let stopItem = NSMenuItem(title: "Stop Typing", action: #selector(stopTyping(_:)), keyEquivalent: "")
     private let permissionItem = NSMenuItem(title: "Grant Accessibility Access…",
                                             action: #selector(requestAccess), keyEquivalent: "")
@@ -60,6 +62,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(summaryItem)
+        previewLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        previewLabel.textColor = .secondaryLabelColor
+        previewLabel.maximumNumberOfLines = 4
+        previewLabel.cell?.truncatesLastVisibleLine = true
+        previewItem.isHidden = true
+        menu.addItem(previewItem)
         stopItem.target = self
         menu.addItem(stopItem)
         permissionItem.target = self
@@ -104,10 +112,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu.propertiesToUpdate.contains(.propertyItemTitle) else { return }
         permissionItem.isHidden = CGPreflightPostEventAccess()
         refreshClipboard()
         refreshStatus()
+        refreshClipboardPreview()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        previewLabel.stringValue = ""
     }
 
     private func toggleTyping() {
@@ -140,6 +154,31 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clipboardChange = clipboard.changeCount
         hasText = clipboard.availableType(from: [.string]) != nil
         refreshStatus()
+    }
+
+    private func refreshClipboardPreview() {
+        let clipboard = NSPasteboard.general
+        let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        guard hasText, clipboard.availableType(from: [concealed]) == nil,
+              let text = clipboard.string(forType: .string) else {
+            previewItem.isHidden = true
+            return
+        }
+        let prefix = text.prefix(512)
+        guard !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            previewItem.isHidden = true
+            return
+        }
+
+        previewLabel.stringValue = prefix.endIndex == text.endIndex ? String(prefix) : prefix + "…"
+        let width: CGFloat = 248
+        let inset: CGFloat = 16
+        let height = ceil(previewLabel.sizeThatFits(NSSize(width: width, height: .greatestFiniteMagnitude)).height)
+        previewLabel.frame = NSRect(x: inset, y: 5, width: width, height: height)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: width + 2 * inset, height: height + 8))
+        view.addSubview(previewLabel)
+        previewItem.view = view
+        previewItem.isHidden = false
     }
 
     private func refreshStatus() {

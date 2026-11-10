@@ -10,7 +10,7 @@ Download the ZIP from [GitHub Releases](https://github.com/mattivilola/paste-use
 
 ## Use
 
-1. Open the app and copy some text. The menu bar clipboard icon fills when text is available.
+1. Open the app and copy some text. The menu bar clipboard icon fills when text is available. Open the menu to preview up to four lines.
 2. Focus a text field and press **⌘⌥V**. On first use, allow Paste User Simulator in **System Settings → Privacy & Security → Accessibility**. Then return to your text field and press the shortcut again.
 3. Press the same shortcut again to stop. A brief indicator confirms when the shortcut starts or stops typing.
 
@@ -24,7 +24,7 @@ Open **Settings** from the menu bar to change the shortcut or speed. The default
 
 The app uses Shift-Return for line breaks in multiline fields.
 
-The app reads text when you trigger the shortcut and keeps it in memory for that typing session. It keeps no clipboard history and sends no clipboard data over the network. Input behavior can vary by app and text field.
+The app reads text when you open the menu for a preview or trigger the shortcut to type. It keeps no clipboard history and sends no clipboard data over the network. Input behavior can vary by app and text field.
 
 ## Build
 
